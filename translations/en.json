@@ -298,6 +298,8 @@
         "none": "None",
         "original_language": "Original language",
         "language": "Language",
+        "spatial_audio": "Spatial Audio for Atmos",
+        "spatial_audio_note": "Plays Dolby TrueHD Atmos and DTS:X tracks in Atmos through Apple's spatial audio. Image-based subtitles and other audio tracks play through the usual player.",
         "transcode_mode": {
           "title": "Audio transcoding",
           "description": "Controls how surround audio (7.1, TrueHD, DTS-HD) is handled",

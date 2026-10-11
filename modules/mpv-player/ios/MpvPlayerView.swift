@@ -22,6 +22,8 @@ struct VideoLoadConfig {
 	var cacheSeconds: Int?     // Seconds of video to buffer
 	var demuxerMaxBytes: Int?  // Max cache size in MB
 	var demuxerMaxBackBytes: Int?  // Max backward cache size in MB
+	/// Plays the audio as spatial audio through AVPlayer instead (tvOS 26+).
+	var spatialAudio: SpatialAudioSource?
 
 	init(
 		url: URL,
@@ -35,7 +37,8 @@ struct VideoLoadConfig {
 		cacheEnabled: String? = nil,
 		cacheSeconds: Int? = nil,
 		demuxerMaxBytes: Int? = nil,
-		demuxerMaxBackBytes: Int? = nil
+		demuxerMaxBackBytes: Int? = nil,
+		spatialAudio: SpatialAudioSource? = nil
 	) {
 		self.url = url
 		self.headers = headers
@@ -49,6 +52,7 @@ struct VideoLoadConfig {
 		self.cacheSeconds = cacheSeconds
 		self.demuxerMaxBytes = demuxerMaxBytes
 		self.demuxerMaxBackBytes = demuxerMaxBackBytes
+		self.spatialAudio = spatialAudio
 	}
 }
 

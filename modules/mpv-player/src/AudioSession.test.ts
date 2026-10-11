@@ -51,10 +51,14 @@ describe("iOS audio session", () => {
   // The renderer's load block waits for the requests made so far, so this one
   // has to be queued before the load or mpv opens its audio output against
   // whatever category the last player left behind.
-  test("loadVideo() asks for the session before it queues the load", () => {
-    const loadVideo = section(engineSource, "\tfunc loadVideo(", "\n\t}\n");
+  test("an mpv load asks for the session before it queues the load", () => {
+    const loadInMPV = section(
+      engineSource,
+      "\tprivate func loadInMPV(",
+      "\n\t}\n",
+    );
 
-    expect(loadVideo).toMatch(
+    expect(loadInMPV).toMatch(
       /if config\.autoplay \{\s*activateAudioSession\(\)\s*\}\s*renderer\?\.load\(/,
     );
   });
@@ -74,7 +78,7 @@ describe("iOS audio session", () => {
     );
 
     expect(helper).toMatch(
-      /^[^\n]*\{\s*guard !isShutDown else \{ return \}\s*audioSession\.activate\(completion: completion\)\s*$/,
+      /^[^\n]*\{\s*guard !isShutDown else \{ return \}\s*audioSession\.activate\(spatialAudio: spatialAudioFallback != nil, completion: completion\)\s*$/,
     );
   });
 

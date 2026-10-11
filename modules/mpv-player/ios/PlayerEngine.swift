@@ -54,6 +54,12 @@ final class MPVPlayerEngine: NSObject {
 	let displayLayer = AVSampleBufferDisplayLayer()
 
 	private var renderer: MPVLayerRenderer?
+	/// Plays TrueHD Atmos and DTS:X as spatial audio in mpv's place, once
+	/// started; see SpatialAudioPlayer.
+	private var spatialAudio: SpatialAudioPlayer?
+	/// What mpv plays if spatial audio fails. Set from the moment it starts
+	/// until it stops, so mpv events and transport stay out of the way.
+	private var spatialAudioFallback: VideoLoadConfig?
 	private var pipController: PiPController?
 	private let nowPlayingManager = MPVNowPlayingManager.shared
 	private let audioSession = PlayerAudioSession.shared
@@ -157,7 +163,7 @@ final class MPVPlayerEngine: NSObject {
 	/// would take the session back with no player left to give it up.
 	private func activateAudioSession(completion: (() -> Void)? = nil) {
 		guard !isShutDown else { return }
-		audioSession.activate(completion: completion)
+		audioSession.activate(spatialAudio: spatialAudioFallback != nil, completion: completion)
 	}
 
 	@objc private func handleAudioSessionInterruption(_ notification: Notification) {
@@ -246,7 +252,22 @@ final class MPVPlayerEngine: NSObject {
 		hasRenderedFirstFrame = false
 		#endif
 		setPictureInPictureAutoStartEnabled(true)
+		stopSpatialAudio()
 
+		#if os(tvOS)
+		if #available(tvOS 26, *), let source = config.spatialAudio {
+			startSpatialAudio(source, config: config, loadGeneration: currentLoadGeneration)
+		} else {
+			loadInMPV(config, loadGeneration: currentLoadGeneration)
+		}
+		#else
+		loadInMPV(config, loadGeneration: currentLoadGeneration)
+		#endif
+
+		delegate?.engine(self, didLoad: config.url)
+	}
+
+	private func loadInMPV(_ config: VideoLoadConfig, loadGeneration: UInt) {
 		let preset = PlayerPreset(
 			id: .sdrRec709,
 			title: "Default",
@@ -277,7 +298,7 @@ final class MPVPlayerEngine: NSObject {
 			cacheSeconds: config.cacheSeconds,
 			demuxerMaxBytes: config.demuxerMaxBytes,
 			demuxerMaxBackBytes: config.demuxerMaxBackBytes,
-			loadGeneration: currentLoadGeneration
+			loadGeneration: loadGeneration
 		)
 
 		// A SyncPlay late join loads paused. Remote Play and Seek must already
@@ -291,8 +312,64 @@ final class MPVPlayerEngine: NSObject {
 			// the previous source was playing or reached EOF while unpaused.
 			pause()
 		}
+	}
 
-		delegate?.engine(self, didLoad: config.url)
+	#if os(tvOS)
+	/// Converting the first segment takes about two seconds, so the chrome
+	/// shows loading meanwhile. Any error leaves the stream to mpv.
+	@available(tvOS 26, *)
+	private func startSpatialAudio(_ source: SpatialAudioSource, config: VideoLoadConfig, loadGeneration: UInt) {
+		spatialAudioFallback = config
+		// An in-place swap leaves the previous file playing in mpv.
+		renderer?.unload()
+		intendedPlayState = config.autoplay
+		setupRemoteCommands()
+		delegate?.engine(self, didChangeLoading: true)
+		Task { @MainActor [weak self] in
+			do {
+				let player = try await SpatialAudioPlayer.start(
+					source: source, file: config.url, headers: config.headers ?? [:],
+					at: config.startPosition ?? 0)
+				guard let self, loadGeneration == self.loadGeneration, !self.isShutDown else {
+					player.stop()
+					return
+				}
+				self.spatialAudio = player
+				player.layer.frame = self.displayLayer.bounds
+				player.layer.videoGravity = self.displayLayer.videoGravity
+				self.displayLayer.addSublayer(player.layer)
+				// Set on the renderer while the stream was starting.
+				player.setSpeed(self.getSpeed())
+				player.setMuted(self.renderer?.isMuted ?? false)
+				player.report(to: self)
+				guard self.intendedPlayState else { return }
+				// AVPlayer does not wait for the session change the way mpv's
+				// unpause does, and the first play has to find it in place.
+				self.activateAudioSession { [weak self, weak player] in
+					guard let self, let player, player === self.spatialAudio, self.intendedPlayState else { return }
+					self.resumePlayback()
+				}
+			} catch {
+				Logger.shared.log("Spatial audio unavailable, playing through mpv: \(error)", type: "Warn")
+				guard let self, loadGeneration == self.loadGeneration, !self.isShutDown else { return }
+				self.fallBackToMPV(at: config.startPosition)
+			}
+		}
+	}
+	#endif
+
+	private func fallBackToMPV(at position: Double?) {
+		guard var config = spatialAudioFallback else { return }
+		stopSpatialAudio()
+		config.startPosition = position
+		config.autoplay = intendedPlayState
+		loadInMPV(config, loadGeneration: loadGeneration)
+	}
+
+	private func stopSpatialAudio() {
+		spatialAudio?.stop()
+		spatialAudio = nil
+		spatialAudioFallback = nil
 	}
 
 	// MARK: - Transport
@@ -309,6 +386,10 @@ final class MPVPlayerEngine: NSObject {
 	private func resumePlayback() {
 		intendedPlayState = true
 		setupRemoteCommands()
+		if spatialAudioFallback != nil {
+			spatialAudio?.play()
+			return
+		}
 		renderer?.play()
 		pipController?.setPlaybackRate(1.0)
 		pipController?.updatePlaybackState()
@@ -316,6 +397,10 @@ final class MPVPlayerEngine: NSObject {
 
 	func pause() {
 		intendedPlayState = false
+		if spatialAudioFallback != nil {
+			spatialAudio?.pause()
+			return
+		}
 		renderer?.pausePlayback()
 		pipController?.setPlaybackRate(0.0)
 		pipController?.updatePlaybackState()
@@ -335,6 +420,7 @@ final class MPVPlayerEngine: NSObject {
 		setPictureInPictureAutoStartEnabled(false)
 		pipController?.stopPictureInPicture()
 		pipController = nil
+		stopSpatialAudio()
 		renderer?.stop()
 
 		// Reset state and re-create the mpv handle so a subsequent
@@ -381,6 +467,7 @@ final class MPVPlayerEngine: NSObject {
 		setPictureInPictureAutoStartEnabled(false)
 		pipController?.stopPictureInPicture()
 		pipController = nil
+		stopSpatialAudio()
 		renderer?.stop()
 		displayLayer.removeFromSuperlayer()
 		clearNowPlayingInfo()
@@ -396,6 +483,10 @@ final class MPVPlayerEngine: NSObject {
 		// Update cached position and Now Playing immediately for smooth Control Center feedback
 		cachedPosition = position
 		syncNowPlaying(isPlaying: !isPaused())
+		if spatialAudioFallback != nil {
+			spatialAudio?.seek(to: position)
+			return
+		}
 		renderer?.seek(to: position, exact: exact)
 	}
 
@@ -404,6 +495,10 @@ final class MPVPlayerEngine: NSObject {
 		let newPosition = max(0, min(cachedPosition + offset, cachedDuration))
 		cachedPosition = newPosition
 		syncNowPlaying(isPlaying: !isPaused())
+		if spatialAudioFallback != nil {
+			spatialAudio?.seek(to: newPosition)
+			return
+		}
 		renderer?.seek(by: offset)
 	}
 
@@ -434,16 +529,19 @@ final class MPVPlayerEngine: NSObject {
 	}
 
 	func syncSubtitleLayerFrame() {
+		spatialAudio?.layer.frame = displayLayer.bounds
 		renderer?.syncSubtitleLayerFrame()
 	}
 
 	func setSpeed(speed: Double) {
+		spatialAudio?.setSpeed(speed)
 		renderer?.setSpeed(speed)
 	}
 
 	/// Mute playback itself, leaving the device output volume alone. The
 	/// renderer retains the flag so it survives an mpv re-creation.
 	func setMute(_ muted: Bool) {
+		spatialAudio?.setMuted(muted)
 		renderer?.setMute(muted)
 	}
 
@@ -452,6 +550,9 @@ final class MPVPlayerEngine: NSObject {
 	}
 
 	func isPaused() -> Bool {
+		if spatialAudioFallback != nil {
+			return spatialAudio?.isPaused ?? !intendedPlayState
+		}
 		return renderer?.isPausedState ?? true
 	}
 
@@ -561,12 +662,27 @@ final class MPVPlayerEngine: NSObject {
 		renderer.getSubtitleTracks(completion: completion)
 	}
 
+	/// While spatial audio plays, `trackId` is the 1-based subtitle rendition
+	/// of the HLS master instead of an mpv track id.
 	func setSubtitleTrack(_ trackId: Int) {
+		if let spatialAudio {
+			spatialAudio.selectSubtitle(trackId)
+			return
+		}
 		renderer?.setSubtitleTrack(trackId)
 	}
 
 	func disableSubtitles() {
+		if let spatialAudio {
+			spatialAudio.selectSubtitle(nil)
+			return
+		}
 		renderer?.disableSubtitles()
+	}
+
+	/// Whether the stream plays as spatial audio rather than through mpv.
+	var isPlayingSpatialAudio: Bool {
+		spatialAudio != nil
 	}
 
 	func getCurrentSubtitleTrack(completion: @escaping (Int) -> Void) {
@@ -665,6 +781,7 @@ final class MPVPlayerEngine: NSObject {
 	func setZoomedToFill(_ zoomed: Bool) {
 		_isZoomedToFill = zoomed
 		displayLayer.videoGravity = zoomed ? .resizeAspectFill : .resizeAspect
+		spatialAudio?.layer.videoGravity = displayLayer.videoGravity
 		renderer?.syncSubtitleLayerFrame()
 	}
 
@@ -676,6 +793,7 @@ final class MPVPlayerEngine: NSObject {
 
 	/// Completion fires on the renderer's mpv work queue (see getSubtitleTracks).
 	func getTechnicalInfo(completion: @escaping ([String: Any]) -> Void) {
+		if let spatialAudio { return completion(spatialAudio.technicalInfo()) }
 		guard let renderer else { return completion([:]) }
 		renderer.getTechnicalInfo(completion: completion)
 	}
@@ -689,7 +807,7 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 		cachedDuration = duration
 
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, self.spatialAudioFallback == nil else { return }
 
 			if self.pipController?.isPictureInPictureActive == true {
 				self.pipController?.setCurrentTimeFromSeconds(position)
@@ -701,7 +819,7 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 
 	func renderer(_: MPVLayerRenderer, didChangePause isPaused: Bool) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, self.spatialAudioFallback == nil else { return }
 
 			print("[MPV] didChangePause: isPaused=\(isPaused), cachedDuration=\(self.cachedDuration)")
 			self.pipController?.setPlaybackRate(isPaused ? 0.0 : 1.0)
@@ -712,28 +830,28 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 
 	func renderer(_: MPVLayerRenderer, didChangeLoading isLoading: Bool) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, self.spatialAudioFallback == nil else { return }
 			self.delegate?.engine(self, didChangeLoading: isLoading)
 		}
 	}
 
 	func renderer(_: MPVLayerRenderer, didBecomeReadyToSeek ready: Bool) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, self.spatialAudioFallback == nil else { return }
 			self.delegate?.engine(self, didBecomeReadyToSeek: ready)
 		}
 	}
 
 	func renderer(_: MPVLayerRenderer, didBecomeTracksReady ready: Bool) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, self.spatialAudioFallback == nil else { return }
 			self.delegate?.engine(self, didBecomeTracksReady: ready)
 		}
 	}
 
 	func renderer(_: MPVLayerRenderer, didDetectHDRMode mode: HDRMode, fps: Double) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, self.spatialAudioFallback == nil else { return }
 			self.delegate?.engine(self, didDetectHDRMode: mode, fps: fps)
 		}
 	}
@@ -766,6 +884,45 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 			guard let self else { return }
 			self.delegate?.engineDidReachEnd(self)
 		}
+	}
+}
+
+// MARK: - SpatialAudioPlayerDelegate
+
+extension MPVPlayerEngine: SpatialAudioPlayerDelegate {
+	func spatialAudioPlayer(_ player: SpatialAudioPlayer, didUpdatePosition position: Double, duration: Double) {
+		guard player === spatialAudio else { return }
+		cachedPosition = position
+		cachedDuration = duration
+		delegate?.engine(self, didUpdateProgress: position, duration: duration, cacheSeconds: 0)
+	}
+
+	func spatialAudioPlayer(_ player: SpatialAudioPlayer, didChangePause isPaused: Bool) {
+		guard player === spatialAudio else { return }
+		syncNowPlaying(isPlaying: !isPaused)
+		delegate?.engine(self, didChangePause: isPaused)
+	}
+
+	func spatialAudioPlayer(_ player: SpatialAudioPlayer, didChangeLoading isLoading: Bool) {
+		guard player === spatialAudio else { return }
+		delegate?.engine(self, didChangeLoading: isLoading)
+	}
+
+	func spatialAudioPlayer(_ player: SpatialAudioPlayer, didBecomeReadyWith hdrMode: HDRMode, fps: Double) {
+		guard player === spatialAudio else { return }
+		delegate?.engine(self, didBecomeReadyToSeek: true)
+		delegate?.engine(self, didBecomeTracksReady: true)
+		delegate?.engine(self, didDetectHDRMode: hdrMode, fps: fps)
+	}
+
+	func spatialAudioPlayerDidReachEnd(_ player: SpatialAudioPlayer) {
+		guard player === spatialAudio else { return }
+		delegate?.engineDidReachEnd(self)
+	}
+
+	func spatialAudioPlayer(_ player: SpatialAudioPlayer, didFailAt position: Double) {
+		guard player === spatialAudio else { return }
+		fallBackToMPV(at: position)
 	}
 }
 

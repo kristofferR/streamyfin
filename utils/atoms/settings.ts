@@ -540,6 +540,11 @@ export type Settings = {
   musicNormalizationMode: MusicNormalizationMode;
   // Audio transcoding mode
   audioTranscodeMode: AudioTranscodeMode;
+  /**
+   * Apple TV native player only: play TrueHD Atmos and DTS:X tracks as Apple
+   * spatial audio through AVPlayer instead of mpv, which decodes them to PCM.
+   */
+  spatialAudio: boolean;
   // Optional third-party lookups. Both call a service directly from the client
   // rather than through Jellyfin, so each can be turned off on its own.
   wikidataAwardsEnabled: boolean;
@@ -722,6 +727,7 @@ export const defaultValues: Settings = {
   musicNormalizationMode: DEFAULT_MUSIC_NORMALIZATION_MODE,
   // Audio transcoding mode
   audioTranscodeMode: AudioTranscodeMode.Auto,
+  spatialAudio: true,
   // Optional third-party lookups
   wikidataAwardsEnabled: true,
   openSubtitlesEnabled: true,

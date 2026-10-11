@@ -27,6 +27,14 @@ struct StreamConfigRecord: Record {
 	/// Source video dimensions (for zoom-to-fill subtitle compensation).
 	@Field var videoWidth: Int?
 	@Field var videoHeight: Int?
+	@Field var spatialAudio: SpatialAudioRecord?
+}
+
+/// Plays the stream's TrueHD Atmos or DTS:X track as spatial audio through
+/// AVPlayer, reading the audio from the stream URL (tvOS 26+).
+struct SpatialAudioRecord: Record {
+	@Field var videoMasterUrl: String = ""
+	@Field var audioTrackOrdinal: Int = 0
 }
 
 struct MetadataRecord: Record {
@@ -251,7 +259,12 @@ extension StreamConfigRecord {
 			cacheEnabled: cacheConfig?.enabled,
 			cacheSeconds: cacheConfig?.cacheSeconds,
 			demuxerMaxBytes: cacheConfig?.maxBytes,
-			demuxerMaxBackBytes: cacheConfig?.maxBackBytes
+			demuxerMaxBackBytes: cacheConfig?.maxBackBytes,
+			spatialAudio: spatialAudio.flatMap { record in
+				URL(string: record.videoMasterUrl).map {
+					SpatialAudioSource(videoMaster: $0, audioTrackOrdinal: record.audioTrackOrdinal)
+				}
+			}
 		)
 	}
 }

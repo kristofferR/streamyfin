@@ -22,7 +22,10 @@ import type {
 import { OrientationLock } from "@/packages/expo-screen-orientation";
 import type { DownloadedItem } from "@/providers/Downloads/types";
 import type { Settings } from "@/utils/atoms/settings";
-import { getActivePlayerType } from "@/utils/atoms/settings";
+import {
+  getActivePlayerType,
+  isNativePlayerSupportedTV,
+} from "@/utils/atoms/settings";
 import {
   getJellyfinHeaders,
   getJellyfinHeadersForUrl,
@@ -59,6 +62,7 @@ import { ticksToSeconds } from "@/utils/time";
 import { getTrickplayInfo, trickplaySheetUrl } from "@/utils/trickplay";
 import type { PlayRequest } from "./playRequest";
 import { resolveTrackIndexes } from "./resolveTrackIndexes";
+import { resolveSpatialAudio } from "./spatialAudio";
 
 export interface NativePlayerStreamSeed {
   url: string;
@@ -402,6 +406,8 @@ export async function buildNativePlayerConfig(params: {
   originalLabel: string;
   /** Skip the item refetch when the caller already has it (episode switch). */
   item?: BaseItemDto;
+  /** False keeps the stream on mpv even for a spatial audio track. */
+  allowSpatialAudio?: boolean;
 }): Promise<{
   config: NativePlayerConfig;
   seed: NativePlayerSessionSeed;
@@ -526,6 +532,26 @@ export async function buildNativePlayerConfig(params: {
     if (Object.keys(withLanguage).length > 0) headers = withLanguage;
   }
 
+  const spatialAudio =
+    api && item.Id
+      ? resolveSpatialAudio({
+          enabled:
+            isNativePlayerSupportedTV &&
+            settings.spatialAudio &&
+            params.allowSpatialAudio !== false &&
+            !offline,
+          api,
+          itemId: item.Id,
+          mediaSource,
+          audioIndex,
+          subtitleIndex,
+          playSessionId: stream.sessionId,
+          needsHeaders:
+            hasHeaders(getJellyfinHeadersForUrl(stream.url, api.basePath)) ||
+            hasHeaders(stream.requiredHttpHeaders),
+        })
+      : undefined;
+
   const config: NativePlayerConfig = {
     stream: {
       url: stream.url,
@@ -545,6 +571,7 @@ export async function buildNativePlayerConfig(params: {
       },
       videoWidth: videoDimensions.width,
       videoHeight: videoDimensions.height,
+      spatialAudio,
     },
     // Same source of truth as the device profile above: the engine the
     // chrome must decode with. Ignored by iOS's mpv-only chrome.
@@ -617,7 +644,8 @@ export async function buildNativePlayerConfig(params: {
       doubleTapToSeekEnabled: !Platform.isTV && settings.enableDoubleTapToSeek,
       // Server search needs connectivity; the OpenSubtitles fallback needs
       // the network either way — offline sessions hide the entry.
-      subtitleSearchEnabled: !offline && !!api,
+      // Downloaded subtitles load into mpv, which spatial audio leaves idle.
+      subtitleSearchEnabled: !offline && !!api && !spatialAudio,
       subtitleSearchLanguages: COMMON_SUBTITLE_LANGUAGES.map((l) => ({
         code: l.code,
         name: l.name,

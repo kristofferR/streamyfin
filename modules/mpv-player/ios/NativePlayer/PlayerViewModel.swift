@@ -1790,7 +1790,9 @@ extension PlayerViewModel: MPVPlayerEngineDelegate {
 
 	func engine(_ engine: MPVPlayerEngine, didBecomeTracksReady ready: Bool) {
 		guard !isTearingDown else { return }
-		emit?("onTracksReady", [:])
+		// Subtitles select differently when spatial audio plays, and a
+		// failed start leaves the stream to mpv.
+		emit?("onTracksReady", ["spatialAudio": engine.isPlayingSpatialAudio])
 	}
 
 	func engine(_ engine: MPVPlayerEngine, didChangePictureInPicture isActive: Bool) {

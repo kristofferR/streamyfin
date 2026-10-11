@@ -1005,6 +1005,20 @@ export default function SettingsTV() {
               })
             }
           />
+          {/* Spatial Audio plays through the native tvOS player only */}
+          {isNativePlayerSupportedTV && settings.nativeVideoPlayerTV && (
+            <>
+              <TVSettingsToggle
+                label={t("home.settings.audio.spatial_audio")}
+                value={settings.spatialAudio}
+                disabledByAdmin={pluginSettings?.spatialAudio?.locked}
+                onToggle={(value) => updateSettings({ spatialAudio: value })}
+              />
+              <Text style={playerNoteStyle}>
+                {t("home.settings.audio.spatial_audio_note")}
+              </Text>
+            </>
+          )}
 
           {/* Subtitles Section */}
           <TVSectionHeader

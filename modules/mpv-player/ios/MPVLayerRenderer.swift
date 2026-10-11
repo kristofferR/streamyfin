@@ -92,7 +92,7 @@ final class MPVLayerRenderer {
     /// isStopping: start() reads it on the render queue right after setMute
     /// writes it from the JS thread, so an async barrier could hand the fresh
     /// handle a stale value and leave playback audible.
-    private var isMuted: Bool {
+    private(set) var isMuted: Bool {
         get { stateQueue.sync { _isMuted } }
         set { stateQueue.sync(flags: .barrier) { _isMuted = newValue } }
     }
@@ -719,6 +719,15 @@ final class MPVLayerRenderer {
         }
     }
     
+    /// Stops the current file and keeps the handle, for a stream another
+    /// player takes over in place.
+    func unload() {
+        onQueue { [weak self] in
+            guard let self, let handle = self.mpv else { return }
+            self.command(handle, ["stop"])
+        }
+    }
+
     func applyPreset(_ preset: PlayerPreset) {
         guard let handle = mpv else { return }
         queue.async { [weak self] in

@@ -31,6 +31,20 @@ export type NativePlayerStreamConfig = {
   /** Source video dimensions (for zoom-to-fill subtitle compensation). */
   videoWidth?: number;
   videoHeight?: number;
+  /** Set when the audio track can play as Apple spatial audio (tvOS 26+). */
+  spatialAudio?: NativePlayerSpatialAudio;
+};
+
+/**
+ * Plays the stream's TrueHD Atmos or DTS:X track as APAC through AVPlayer
+ * instead of mpv: SpatialAudioBridge reads the audio from `url` and serves it
+ * beside the server's stream-copy HLS video. Any failure falls back to mpv.
+ */
+export type NativePlayerSpatialAudio = {
+  /** Jellyfin's HLS master for the video; its audio is replaced. */
+  videoMasterUrl: string;
+  /** Position of the track among the file's audio tracks (Matroska order). */
+  audioTrackOrdinal: number;
 };
 
 export type NativePlayerMetadata = {
@@ -418,7 +432,10 @@ export type NativePlayerEvents = {
    * Fired after embedded track enumeration AND again after each external
    * sub-add — re-run the subtitle identity resolution on every fire.
    */
-  onTracksReady: (payload: Record<string, never>) => void;
+  onTracksReady: (payload: {
+    /** The stream plays as spatial audio rather than through mpv. */
+    spatialAudio?: boolean;
+  }) => void;
   onPictureInPictureChange: (payload: { isActive: boolean }) => void;
   onTrackSelectionRequested: (
     payload: NativePlayerTrackSelectionRequest,

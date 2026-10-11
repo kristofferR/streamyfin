@@ -1,4 +1,7 @@
-import type { BaseItemDto } from "@jellyfin/sdk/lib/generated-client";
+import type {
+  BaseItemDto,
+  MediaSourceInfo,
+} from "@jellyfin/sdk/lib/generated-client";
 import {
   PlaybackOrder,
   type PlaybackProgressInfo,
@@ -130,6 +133,11 @@ import {
 import { resolveFailedPresentation } from "@/utils/nativePlayer/resolveFailedPresentation";
 import { resolveTeardownReport } from "@/utils/nativePlayer/resolveTeardownReport";
 import {
+  isSpatialAudioStream,
+  spatialSubtitleChange,
+  spatialSubtitleTrack,
+} from "@/utils/nativePlayer/spatialAudio";
+import {
   buildNativeSyncPlayState,
   dispatchNativeSyncPlayAction,
   isSameStreamUrl,
@@ -170,6 +178,11 @@ const NEXT_EPISODE_COUNTDOWN_SECONDS = NEXT_EPISODE_COUNTDOWN_MS / 1000;
  * in React state, so a tick already in flight can't observe a stale value.
  */
 interface NativeSession extends NativePlayerSessionSeed {
+  /**
+   * The stream plays as spatial audio through AVPlayer instead of mpv. Set
+   * from the config, then from onTracksReady: a failed start falls back to mpv.
+   */
+  spatialAudio: boolean;
   isReady: boolean;
   isBuffering: boolean;
   syncPlaylistItemId?: string;
@@ -265,6 +278,17 @@ const nativePlayerSubtitleFacade: SubtitleSelectablePlayer = {
   getSubtitleTracks: nativePlayerGetSubtitleTracks,
   setSubtitleTrack: nativePlayerSetSubtitleTrack,
   disableSubtitles: nativePlayerDisableSubtitles,
+};
+
+/** While spatial audio plays, subtitles are the HLS master's renditions. */
+const applySpatialSubtitleSelection = (
+  mediaSource: MediaSourceInfo,
+  jellyfinIndex: number,
+) => {
+  const track = spatialSubtitleTrack(mediaSource, jellyfinIndex);
+  return track === undefined
+    ? nativePlayerDisableSubtitles()
+    : nativePlayerSetSubtitleTrack(track);
 };
 
 /**
@@ -950,6 +974,14 @@ const NativePlayerProviderInner: React.FC<{
         strings: buildNativePlayerStrings(t),
         originalLabel: t("common.original_audio"),
         item: options.item,
+        // SyncPlay holds the group at positions AVPlayer reaches seconds after
+        // a seek, and a client-side sidecar subtitle only loads into mpv.
+        allowSpatialAudio:
+          !syncRef.current.enabled &&
+          !(
+            sessionRef.current?.item.Id === req.itemId &&
+            sessionRef.current.localSubtitle?.active
+          ),
       }).catch((error) => {
         logAndCaptureError("NativePlayer config build failed", error, {
           offline: req.offline,
@@ -977,6 +1009,7 @@ const NativePlayerProviderInner: React.FC<{
 
       const session: NativeSession = {
         ...built.seed,
+        spatialAudio: built.config.stream.spatialAudio !== undefined,
         isReady: false,
         isBuffering: true,
         syncPlaylistItemId: built.config.syncPlay?.currentPlaylistItemId,
@@ -1409,6 +1442,25 @@ const NativePlayerProviderInner: React.FC<{
     [pushTrackMenus],
   );
 
+  /** Whether this audio track would play as spatial audio in the session. */
+  const prefersSpatialAudio = useCallback(
+    (session: NativeSession, audioIndex: number | undefined) =>
+      isNativePlayerSupportedTV &&
+      settingsRef.current?.spatialAudio === true &&
+      !syncRef.current.enabled &&
+      !session.offline &&
+      isSpatialAudioStream(
+        session.stream.mediaSource.MediaStreams?.find(
+          (s) =>
+            s.Type === "Audio" &&
+            s.Index ===
+              (audioIndex ??
+                session.stream.mediaSource.DefaultAudioStreamIndex),
+        ),
+      ),
+    [],
+  );
+
   const handleAudioSelection = useCallback(
     async (
       session: NativeSession,
@@ -1416,9 +1468,14 @@ const NativePlayerProviderInner: React.FC<{
       positionSec: number,
     ) => {
       const isTranscoding = Boolean(session.stream.mediaSource.TranscodingUrl);
-      // A transcoded stream only carries the encoded audio track — switching
+      // A transcoded stream only carries the encoded audio track, and spatial
+      // audio plays one track through AVPlayer — switching to or from either
       // requires re-negotiating the stream (mirror of handleAudioIndexChange).
-      if (isTranscoding) {
+      if (
+        isTranscoding ||
+        session.spatialAudio ||
+        prefersSpatialAudio(session, jellyfinIndex)
+      ) {
         await replaceStream(session, {
           audioIndex: jellyfinIndex,
           positionTicks: msToTicks(positionSec * 1000),
@@ -1436,7 +1493,7 @@ const NativePlayerProviderInner: React.FC<{
       }
       pushTrackMenus(session);
     },
-    [replaceStream, pushTrackMenus],
+    [replaceStream, pushTrackMenus, prefersSpatialAudio],
   );
 
   const handleSubtitleSelection = useCallback(
@@ -1482,6 +1539,30 @@ const NativePlayerProviderInner: React.FC<{
         return;
       }
 
+      const spatialChange = spatialSubtitleChange({
+        mediaSource: session.stream.mediaSource,
+        playing: session.spatialAudio,
+        preferred: prefersSpatialAudio(session, session.currentAudioIndex),
+        from: session.currentSubtitleIndex,
+        to: jellyfinIndex,
+      });
+      if (spatialChange === "rendition") {
+        session.currentSubtitleIndex = jellyfinIndex;
+        await applySpatialSubtitleSelection(
+          session.stream.mediaSource,
+          jellyfinIndex,
+        );
+        pushTrackMenus(session);
+        return;
+      }
+      if (spatialChange === "reload") {
+        await replaceStream(session, {
+          subtitleIndex: jellyfinIndex,
+          positionTicks: msToTicks(positionSec * 1000),
+        });
+        return;
+      }
+
       session.currentSubtitleIndex = jellyfinIndex;
       const result = await applySubtitleSelection(session, jellyfinIndex);
       if (result.kind === "notFound" || result.kind === "burnedIn") {
@@ -1498,6 +1579,7 @@ const NativePlayerProviderInner: React.FC<{
       applyLocalSubtitleSelection,
       replaceStream,
       pushTrackMenus,
+      prefersSpatialAudio,
     ],
   );
 
@@ -1898,15 +1980,23 @@ const NativePlayerProviderInner: React.FC<{
         }
       }),
 
-      addNativePlayerListener("onTracksReady", () => {
+      addNativePlayerListener("onTracksReady", (payload) => {
         const session = sessionRef.current;
         if (!session || session.awaitingLoad) return;
+        if (typeof payload?.spatialAudio === "boolean") {
+          session.spatialAudio = payload.spatialAudio;
+        }
         // Re-apply the current selection on every fire — it fires again after
         // each external sub-add and the identity re-apply is idempotent.
         if (session.localSubtitle?.active) {
           // The active selection is the client-side sidecar, which the
           // Jellyfin-index resolver knows nothing about.
           void applyLocalSubtitleSelection(session);
+        } else if (session.spatialAudio) {
+          void applySpatialSubtitleSelection(
+            session.stream.mediaSource,
+            session.currentSubtitleIndex,
+          );
         } else {
           void applySubtitleSelection(session, session.currentSubtitleIndex);
         }
