@@ -40,6 +40,7 @@ final class SpatialAudioPlayer {
 	private let masterURL: URL
 	private let teardown: @MainActor () -> Void
 	private var observations: [NSKeyValueObservation] = []
+	private var itemStatusObservation: NSKeyValueObservation?
 	private var notificationObservers: [NSObjectProtocol] = []
 	private var timeObserver: Any?
 	private var stallTimer: Timer?
@@ -124,6 +125,8 @@ final class SpatialAudioPlayer {
 		guard !isStopped else { return }
 		isStopped = true
 		observations.forEach { $0.invalidate() }
+		itemStatusObservation?.invalidate()
+		itemStatusObservation = nil
 		notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
 		if let timeObserver { player.removeTimeObserver(timeObserver) }
 		stallTimer?.invalidate()
@@ -184,8 +187,9 @@ final class SpatialAudioPlayer {
 			player.observe(\.timeControlStatus, options: [.initial]) { [weak self] _, _ in
 				DispatchQueue.main.async { self?.timeControlStatusChanged() }
 			},
-			player.observe(\.currentItem?.status, options: [.initial]) { [weak self] _, _ in
-				DispatchQueue.main.async { self?.itemStatusChanged() }
+			player.observe(\.currentItem, options: [.initial, .new]) { [weak self] player, _ in
+				let item = player.currentItem
+				DispatchQueue.main.async { self?.observeItemStatus(item) }
 			},
 		]
 		timeObserver = player.addPeriodicTimeObserver(
@@ -212,6 +216,17 @@ final class SpatialAudioPlayer {
 		]
 		stallTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
 			self?.recoverIfStalled()
+		}
+	}
+
+	private func observeItemStatus(_ item: AVPlayerItem?) {
+		guard !isStopped, item === player.currentItem else { return }
+		itemStatusObservation?.invalidate()
+		itemStatusObservation = item?.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+			DispatchQueue.main.async {
+				guard let self, !self.isStopped, item === self.player.currentItem else { return }
+				self.itemStatusChanged()
+			}
 		}
 	}
 

@@ -119,9 +119,26 @@ describe("resolveSpatialAudio", () => {
     ).toBeDefined();
   });
 
-  it("keeps text subtitles and leaves image subtitles to mpv", () => {
-    expect(resolve({ subtitleIndex: 4 })).toBeDefined();
+  it("leaves text and image subtitles to mpv to keep captions in sync", () => {
+    expect(resolve({ subtitleIndex: 4 })).toBeUndefined();
     expect(resolve({ subtitleIndex: 5 })).toBeUndefined();
+    expect(resolve({ subtitleIndex: 6 })).toBeUndefined();
+  });
+
+  it("uses another non-spatial track when no light audio track exists", () => {
+    const mediaSource = source({
+      MediaStreams: source().MediaStreams?.filter((s) => s.Index !== 3),
+    });
+    const url = new URL(resolve({ mediaSource })?.videoMasterUrl ?? "");
+    expect(url.searchParams.get("AudioStreamIndex")).toBe("1");
+  });
+
+  it("still plays files whose only audio track is spatial", () => {
+    const mediaSource = source({
+      MediaStreams: [{ Type: "Video", Index: 0, Codec: "hevc" }, atmos],
+    });
+    const url = new URL(resolve({ mediaSource })?.videoMasterUrl ?? "");
+    expect(url.searchParams.get("AudioStreamIndex")).toBe("2");
   });
 
   it("leaves everything else to mpv", () => {
@@ -165,22 +182,24 @@ describe("spatialSubtitleChange", () => {
       ...overrides,
     });
 
-  it("switches renditions while spatial audio plays", () => {
-    expect(change({ playing: true, from: -1, to: 4 })).toBe("rendition");
-    expect(change({ playing: true, from: 4, to: -1 })).toBe("rendition");
+  it("reloads through mpv when enabling text subtitles", () => {
+    expect(change({ playing: true, from: -1, to: 4 })).toBe("reload");
+    expect(change({ playing: true, from: -1, to: 6 })).toBe("reload");
+    expect(change({ playing: true, from: -1, to: -1 })).toBe("rendition");
   });
 
   it("hands an image subtitle to mpv", () => {
     expect(change({ playing: true, from: 4, to: 5 })).toBe("reload");
   });
 
-  it("returns to spatial audio when leaving an image subtitle", () => {
-    expect(change({ preferred: true, from: 5, to: 4 })).toBe("reload");
+  it("returns to spatial audio when disabling any subtitle", () => {
+    expect(change({ preferred: true, from: 4, to: -1 })).toBe("reload");
     expect(change({ preferred: true, from: 5, to: -1 })).toBe("reload");
   });
 
   it("leaves other picks to mpv", () => {
     expect(change({ preferred: true, from: 4, to: 6 })).toBeUndefined();
+    expect(change({ preferred: true, from: 5, to: 4 })).toBeUndefined();
     expect(change({ preferred: false, from: 5, to: 4 })).toBeUndefined();
   });
 });

@@ -268,41 +268,43 @@ struct TVControlsRow: View {
 	private var audioMenu: some View {
 		Menu {
 			trackMenuItems(viewModel.audioMenu) { viewModel.selectAudio($0) }
-			Menu {
-				ForEach(PlayerViewModel.syncOffsetPresets, id: \.self) { offset in
-					menuRow(
-						label: offsetLabel(offset),
-						selected: abs(viewModel.audioDelay - offset) < 0.001
-					) {
-						viewModel.setAudioDelay(offset)
+			if !viewModel.isPlayingSpatialAudio {
+				Menu {
+					ForEach(PlayerViewModel.syncOffsetPresets, id: \.self) { offset in
+						menuRow(
+							label: offsetLabel(offset),
+							selected: abs(viewModel.audioDelay - offset) < 0.001
+						) {
+							viewModel.setAudioDelay(offset)
+						}
 					}
+				} label: {
+					Text(viewModel.str("audioSync", "Audio sync"))
 				}
-			} label: {
-				Text(viewModel.str("audioSync", "Audio sync"))
-			}
-			Menu {
-				ForEach(PlayerViewModel.volumeBoostPresets, id: \.self) { percent in
-					menuRow(
-						label: "\(percent)%",
-						selected: viewModel.volumeBoostPercent == percent
-					) {
-						viewModel.setVolumeBoost(percent)
+				Menu {
+					ForEach(PlayerViewModel.volumeBoostPresets, id: \.self) { percent in
+						menuRow(
+							label: "\(percent)%",
+							selected: viewModel.volumeBoostPercent == percent
+						) {
+							viewModel.setVolumeBoost(percent)
+						}
 					}
+				} label: {
+					Text(viewModel.str("volumeBoost", "Volume boost"))
 				}
-			} label: {
-				Text(viewModel.str("volumeBoost", "Volume boost"))
-			}
-			menuRow(
-				label: viewModel.str("dialogueBoost", "Dialogue boost"),
-				selected: viewModel.dialogueBoostEnabled
-			) {
-				viewModel.toggleDialogueBoost()
-			}
-			menuRow(
-				label: viewModel.str("monoAudio", "Mono audio"),
-				selected: viewModel.monoAudioEnabled
-			) {
-				viewModel.toggleMonoAudio()
+				menuRow(
+					label: viewModel.str("dialogueBoost", "Dialogue boost"),
+					selected: viewModel.dialogueBoostEnabled
+				) {
+					viewModel.toggleDialogueBoost()
+				}
+				menuRow(
+					label: viewModel.str("monoAudio", "Mono audio"),
+					selected: viewModel.monoAudioEnabled
+				) {
+					viewModel.toggleMonoAudio()
+				}
 			}
 		} label: {
 			icon("speaker.wave.2.fill")
@@ -318,29 +320,31 @@ struct TVControlsRow: View {
 	private var subtitlesMenu: some View {
 		Menu {
 			trackMenuItems(viewModel.subtitleMenu) { viewModel.selectSubtitle($0) }
-			Menu {
-				ForEach(PlayerViewModel.subtitleScalePresets, id: \.self) { preset in
-					menuRow(
-						label: "\(Int((preset * 100).rounded()))%",
-						selected: abs(viewModel.subtitleScale - preset) < 0.001
-					) {
-						viewModel.setSubtitleScale(preset)
+			if !viewModel.isPlayingSpatialAudio {
+				Menu {
+					ForEach(PlayerViewModel.subtitleScalePresets, id: \.self) { preset in
+						menuRow(
+							label: "\(Int((preset * 100).rounded()))%",
+							selected: abs(viewModel.subtitleScale - preset) < 0.001
+						) {
+							viewModel.setSubtitleScale(preset)
+						}
 					}
+				} label: {
+					Text(viewModel.str("subtitleSize", "Subtitle size"))
 				}
-			} label: {
-				Text(viewModel.str("subtitleSize", "Subtitle size"))
-			}
-			Menu {
-				ForEach(PlayerViewModel.syncOffsetPresets, id: \.self) { offset in
-					menuRow(
-						label: offsetLabel(offset),
-						selected: abs(viewModel.subtitleDelay - offset) < 0.001
-					) {
-						viewModel.setSubtitleDelay(offset)
+				Menu {
+					ForEach(PlayerViewModel.syncOffsetPresets, id: \.self) { offset in
+						menuRow(
+							label: offsetLabel(offset),
+							selected: abs(viewModel.subtitleDelay - offset) < 0.001
+						) {
+							viewModel.setSubtitleDelay(offset)
+						}
 					}
+				} label: {
+					Text(viewModel.str("subtitleSync", "Subtitle sync"))
 				}
-			} label: {
-				Text(viewModel.str("subtitleSync", "Subtitle sync"))
 			}
 			if viewModel.subtitleSearchEnabled {
 				Button {

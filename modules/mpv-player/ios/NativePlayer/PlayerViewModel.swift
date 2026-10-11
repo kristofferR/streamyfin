@@ -195,7 +195,9 @@ final class PlayerViewModel: NSObject, ObservableObject {
 	private(set) var holdToSpeedRate: Double = 2.0
 	private(set) var pinchToZoomEnabled = true
 	private(set) var doubleTapToSeekEnabled = false
-	private(set) var subtitleSearchEnabled = false
+	@Published private(set) var isPlayingSpatialAudio = false
+	private var subtitleSearchAvailable = false
+	var subtitleSearchEnabled: Bool { subtitleSearchAvailable && !isPlayingSpatialAudio }
 	private(set) var subtitleSearchLanguages: [SubtitleSearchLanguageRecord] = []
 	private(set) var videoWidth: Int?
 	private(set) var videoHeight: Int?
@@ -527,7 +529,8 @@ final class PlayerViewModel: NSObject, ObservableObject {
 		holdToSpeedRate = config.ui.holdToSpeedRate
 		pinchToZoomEnabled = config.ui.pinchToZoomEnabled
 		doubleTapToSeekEnabled = config.ui.doubleTapToSeekEnabled
-		subtitleSearchEnabled = config.ui.subtitleSearchEnabled
+		isPlayingSpatialAudio = config.stream.spatialAudio != nil
+		subtitleSearchAvailable = config.ui.subtitleSearchEnabled
 		subtitleSearchLanguages = config.ui.subtitleSearchLanguages
 		subtitleScale = config.subtitleStyle?.scale ?? 1.0
 		subtitleScaleLocked = config.subtitleStyle?.scaleLocked ?? false
@@ -1790,6 +1793,7 @@ extension PlayerViewModel: MPVPlayerEngineDelegate {
 
 	func engine(_ engine: MPVPlayerEngine, didBecomeTracksReady ready: Bool) {
 		guard !isTearingDown else { return }
+		isPlayingSpatialAudio = engine.isPlayingSpatialAudio
 		// Subtitles select differently when spatial audio plays, and a
 		// failed start leaves the stream to mpv.
 		emit?("onTracksReady", ["spatialAudio": engine.isPlayingSpatialAudio])

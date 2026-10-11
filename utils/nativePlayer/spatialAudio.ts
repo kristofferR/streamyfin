@@ -25,8 +25,9 @@ const COPYABLE_VIDEO_CODECS = new Set(["hevc", "h264"]);
 
 /**
  * Audio cheap for the server to transcode. The master playlist must carry
- * audio, which AVPlayer then ignores for the APAC, so Jellyfin should not
- * spend a TrueHD decode on it.
+ * audio, which AVPlayer then ignores for the APAC. Prefer a light track,
+ * then any non-spatial track. With only spatial tracks, the server still
+ * has to decode one to supply that unused AAC rendition.
  */
 const LIGHT_AUDIO_CODECS = new Set(["aac", "ac3", "eac3", "mp3", "opus"]);
 
@@ -40,7 +41,7 @@ const textSubtitles = (mediaSource: MediaSourceInfo) =>
  * How the native player plays the selected audio track as spatial audio, or
  * undefined when it plays through mpv: anything but online direct play of a
  * Matroska file whose track is TrueHD Atmos or DTS:X, with video Jellyfin can
- * copy and no subtitle that would have to be burned in.
+ * copy and no selected subtitle.
  */
 export const resolveSpatialAudio = (options: {
   /** The setting is on and the native tvOS 26 player plays the item. */
@@ -82,18 +83,17 @@ export const resolveSpatialAudio = (options: {
   const audioTrackOrdinal = fileAudio.findIndex((s) => s.Index === audioIndex);
   if (!isSpatialAudioStream(fileAudio[audioTrackOrdinal])) return undefined;
 
-  if (
-    options.subtitleIndex !== -1 &&
-    !textSubtitles(mediaSource).some((s) => s.Index === options.subtitleIndex)
-  ) {
-    return undefined;
-  }
+  // Jellyfin's HLS WebVTT time map assumes MPEG-TS's 10-second offset,
+  // which puts captions late against fMP4 video (jellyfin/jellyfin#16647).
+  // Keep subtitle playback on mpv until a server fix is available.
+  if (options.subtitleIndex !== -1) return undefined;
 
   const lightAudio = fileAudio.find((s) =>
     LIGHT_AUDIO_CODECS.has(s.Codec?.toLowerCase() ?? ""),
   );
+  const hlsAudio =
+    lightAudio ?? fileAudio.find((s) => !isSpatialAudioStream(s));
   // Stream copy keeps 4K HDR untouched, and AVPlayer needs fMP4 for HEVC.
-  // Text subtitles come along as WebVTT renditions, which the stream keeps.
   const params = new URLSearchParams({
     MediaSourceId: mediaSource.Id,
     DeviceId: api.deviceInfo.id,
@@ -103,7 +103,7 @@ export const resolveSpatialAudio = (options: {
     SegmentContainer: "mp4",
     BreakOnNonKeyFrames: "true",
     AudioCodec: "aac",
-    AudioStreamIndex: String(lightAudio?.Index ?? audioIndex),
+    AudioStreamIndex: String(hlsAudio?.Index ?? audioIndex),
     TranscodingMaxAudioChannels: "2",
     AudioBitrate: "128000",
     AllowAudioStreamCopy: "false",
@@ -134,8 +134,8 @@ export const spatialSubtitleTrack = (
 /**
  * How a subtitle pick applies around spatial audio: as one of the stream's
  * renditions, by re-negotiating the stream, or (undefined) in mpv as usual.
- * An image subtitle has to be drawn by mpv, and leaving the one that kept a
- * spatial audio track on mpv lets the track play as spatial audio again.
+ * Subtitles use mpv to avoid Jellyfin's fMP4 HLS caption timing bug.
+ * Disabling subtitles lets the track play as spatial audio again.
  */
 export const spatialSubtitleChange = (options: {
   mediaSource: MediaSourceInfo;
@@ -146,15 +146,8 @@ export const spatialSubtitleChange = (options: {
   from: number;
   to: number;
 }): "rendition" | "reload" | undefined => {
-  const isImage = (index: number) =>
-    (options.mediaSource.MediaStreams ?? []).some(
-      (s) =>
-        s.Type === "Subtitle" &&
-        s.Index === index &&
-        s.IsTextSubtitleStream === false,
-    );
-  if (options.playing) return isImage(options.to) ? "reload" : "rendition";
-  if (options.preferred && isImage(options.from) && !isImage(options.to)) {
+  if (options.playing) return options.to === -1 ? "rendition" : "reload";
+  if (options.preferred && options.from !== -1 && options.to === -1) {
     return "reload";
   }
   return undefined;

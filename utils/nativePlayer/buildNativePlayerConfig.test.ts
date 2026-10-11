@@ -30,6 +30,7 @@ jest.mock("@/utils/jellyfin/media/getStreamUrl", () => ({
 // them, and none of it has a say in the headers.
 jest.mock("@/utils/atoms/settings", () => ({
   getActivePlayerType: () => "mpv",
+  isNativePlayerSupportedTV: true,
 }));
 jest.mock("@/components/BitrateSelector", () => ({
   BITRATES: [{ key: "Max", value: undefined }],
@@ -42,7 +43,11 @@ jest.mock("@/utils/subtitles/subtitleStyle", () => ({
 }));
 
 const SERVER = "https://jellyfin.example";
-const api = { basePath: SERVER, accessToken: "token" } as Api;
+const api = {
+  basePath: SERVER,
+  accessToken: "token",
+  deviceInfo: { id: "device", name: "Apple TV" },
+} as Api;
 const item: BaseItemDto = { Id: "item-1", Name: "Movie", Type: "Movie" };
 
 /** The stream headers the native player is handed for one negotiated stream. */
@@ -134,4 +139,43 @@ describe("the native player's stream headers", () => {
       }),
     ).toBeUndefined();
   });
+});
+
+test("keeps subtitle search available to mpv if spatial playback falls back", async () => {
+  jest.mocked(getStreamUrl).mockResolvedValue({
+    url: `${SERVER}/Videos/1/stream.mkv`,
+    sessionId: "session-1",
+    mediaSource: {
+      Id: "source-1",
+      Container: "mkv",
+      DefaultAudioStreamIndex: 1,
+      MediaStreams: [
+        { Type: "Video", Index: 0, Codec: "hevc" },
+        {
+          Type: "Audio",
+          Index: 1,
+          Codec: "truehd",
+          AudioSpatialFormat: "DolbyAtmos",
+        },
+      ],
+    },
+  } as Awaited<ReturnType<typeof getStreamUrl>>);
+
+  const built = await buildNativePlayerConfig({
+    api,
+    userId: "user-1",
+    settings: {
+      spatialAudio: true,
+      playbackSpeedPerShow: {},
+      playbackSpeedPerMedia: {},
+    } as Settings,
+    req: { itemId: "item-1", offline: false, subtitleIndex: -1 },
+    getDownloadedItemById: () => undefined,
+    strings: {} as NativePlayerStrings,
+    originalLabel: "Original",
+    item,
+  });
+
+  expect(built?.config.stream.spatialAudio).toBeDefined();
+  expect(built?.config.ui?.subtitleSearchEnabled).toBe(true);
 });

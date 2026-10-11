@@ -644,8 +644,9 @@ export async function buildNativePlayerConfig(params: {
       doubleTapToSeekEnabled: !Platform.isTV && settings.enableDoubleTapToSeek,
       // Server search needs connectivity; the OpenSubtitles fallback needs
       // the network either way — offline sessions hide the entry.
-      // Downloaded subtitles load into mpv, which spatial audio leaves idle.
-      subtitleSearchEnabled: !offline && !!api && !spatialAudio,
+      // Native chrome gates this against the active engine so mpv fallback
+      // restores search for downloaded sidecars.
+      subtitleSearchEnabled: !offline && !!api,
       subtitleSearchLanguages: COMMON_SUBTITLE_LANGUAGES.map((l) => ({
         code: l.code,
         name: l.name,
