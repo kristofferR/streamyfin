@@ -1,4 +1,4 @@
-#if os(tvOS)
+#if os(tvOS) || os(iOS)
 import AVFoundation
 import MPVKit
 import Synchronization
@@ -15,7 +15,7 @@ import SpatialAudioPlayback
 /// here and is reported through `onFailure`; the player then takes
 /// passthrough off for that codec and selects the track again, so mpv decodes
 /// it to PCM as it always has.
-@available(tvOS 26, *)
+@available(iOS 26, tvOS 26, *)
 final class SpatialAudioSink {
 	/// The address mpv takes as `ao-spatial-sink`, valid while this lives.
 	var address: Int64 { Int64(Int(bitPattern: callbacks)) }

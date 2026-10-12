@@ -11,15 +11,12 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   s.dependency 'MPVKit'
 
-  # Spatial audio for TrueHD Atmos and DTS:X on Apple TV (SpatialAudioSink.swift).
-  # TV builds only: the phone app does not use it.
-  if ENV['EXPO_TV'] == '1'
-    spm_dependency(s,
-      url: 'https://github.com/kristofferR/SpatialAudioBridge',
-      requirement: { kind: 'upToNextMajorVersion', minimumVersion: '1.5.0' },
-      products: ['SpatialAudioBridge', 'SpatialAudioPlayback']
-    )
-  end
+  # Spatial audio for TrueHD Atmos and DTS:X (SpatialAudioSink.swift).
+  spm_dependency(s,
+    url: 'https://github.com/kristofferR/SpatialAudioBridge',
+    requirement: { kind: 'upToNextMajorVersion', minimumVersion: '1.5.0' },
+    products: ['SpatialAudioBridge', 'SpatialAudioPlayback']
+  )
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

@@ -128,11 +128,9 @@ final class MPVLayerRenderer {
 
     /// Whether mpv's output is playing a track as spatial audio.
     var isPlayingSpatialAudio: Bool {
-        #if os(tvOS)
-        if #available(tvOS 26, *) {
+        if #available(iOS 26, tvOS 26, *) {
             return (spatialAudioSink as? SpatialAudioSink)?.isOpen ?? false
         }
-        #endif
         return false
     }
 
@@ -382,11 +380,11 @@ final class MPVLayerRenderer {
         // VLC's audiounit_ios does; av3's clamp for layouts that come back with
         // labels mpv cannot map stays in as well. iOS is unchanged either way -
         // its autoprobe already picks audiounit ahead of avfoundation.
-        #if os(tvOS)
-        if #available(tvOS 26, *) {
+        if #available(iOS 26, tvOS 26, *) {
             // TrueHD and DTS-HD reach the app as passthrough and play as
-            // spatial audio (SpatialAudioSink); every other track, and any
-            // stream the sink fails on, is decoded to PCM for audiounit.
+            // spatial audio (SpatialAudioSink), to an HDMI receiver or AirPods.
+            // Every other track, and any stream the sink fails on, is decoded
+            // to PCM for audiounit.
             let handleAddress = Int(bitPattern: handle)
             let sink = SpatialAudioSink { [weak self] codec, isCurrent in
                 self?.playAsPCM(codec, handleAddress: handleAddress, isCurrent: isCurrent)
@@ -398,9 +396,10 @@ final class MPVLayerRenderer {
             checkError(mpv_set_option_string(handle, "audio-spdif", Self.spatialAudioCodecs.joined(separator: ",")))
             checkError(mpv_set_option_string(handle, "ao", "spatial,audiounit"))
         } else {
+            #if os(tvOS)
             checkError(mpv_set_option_string(handle, "ao", "audiounit"))
+            #endif
         }
-        #endif
 
         // Subtitle and audio settings
         checkError(mpv_set_option_string(mpv, "sub-scale-with-window", "no"))
@@ -1193,6 +1192,7 @@ final class MPVLayerRenderer {
             // Audio output is now active - notify delegate
             if let aoName = getStringProperty(handle: handle, name: name) {
                 print("[MPV] 🔊 Audio output selected: \(aoName)")
+                if aoName == "spatial" { logAudioRoute("spatial audio") }
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.delegate?.renderer(self, didSelectAudioOutput: aoName)
@@ -1232,7 +1232,7 @@ final class MPVLayerRenderer {
             let outputs = session.currentRoute.outputs.map { port -> String in
                 let channels = port.channels ?? []
                 let labels = channels.map { String($0.channelLabel) }.joined(separator: ",")
-                return "\(port.portType.rawValue)(\(channels.count)ch labels=[\(labels)])"
+                return "\(port.portType.rawValue)(\(channels.count)ch labels=[\(labels)] spatial=\(port.isSpatialAudioEnabled))"
             }
             Logger.shared.log(
                 "Audio route (\(reason)): outputs=\(outputs.joined(separator: " + ")) "
