@@ -121,10 +121,12 @@ final class MPVLayerRenderer {
     /// Those still passed through for this track, after any the library
     /// refused. Read and written on `queue`.
     private var spatialAudioPassthrough: [String] = []
-    /// Dialogue boost and mono downmix are mpv filters, which passthrough
-    /// skips, so while either is on every track decodes to PCM. On `queue`.
+    /// Dialogue boost, mono downmix and speeds other than 1× are mpv filters,
+    /// which passthrough skips, so while any is on every track decodes to PCM.
+    /// On `queue`.
     private var dialogueBoost = false
     private var monoDownmix = false
+    private var stretchesTime = false
 
     /// Whether mpv's output is playing a track as spatial audio.
     var isPlayingSpatialAudio: Bool {
@@ -790,7 +792,7 @@ final class MPVLayerRenderer {
     /// playing track as it is; selecting it again rebuilds its decoder and output.
     private func updateSpatialAudioPassthrough(reselect: Bool) {
         guard spatialAudioSink != nil, let handle = mpv else { return }
-        let codecs = (dialogueBoost || monoDownmix ? [] : spatialAudioPassthrough).joined(separator: ",")
+        let codecs = (dialogueBoost || monoDownmix || stretchesTime ? [] : spatialAudioPassthrough).joined(separator: ",")
         guard getStringProperty(handle: handle, name: "audio-spdif") != codecs else { return }
         setProperty(name: "audio-spdif", value: codecs)
         var aid: Int64 = 0
@@ -1349,6 +1351,11 @@ final class MPVLayerRenderer {
     
     func setSpeed(_ speed: Double) {
         playbackSpeed = speed
+        onQueue { [weak self] in
+            guard let self else { return }
+            self.stretchesTime = speed != 1
+            self.updateSpatialAudioPassthrough(reselect: true)
+        }
         setProperty(name: "speed", value: String(speed))
     }
     
