@@ -16,7 +16,7 @@ Pod::Spec.new do |s|
   if ENV['EXPO_TV'] == '1'
     spm_dependency(s,
       url: 'https://github.com/kristofferR/SpatialAudioBridge',
-      requirement: { kind: 'upToNextMajorVersion', minimumVersion: '1.4.0' },
+      requirement: { kind: 'upToNextMajorVersion', minimumVersion: '1.5.0' },
       products: ['SpatialAudioBridge', 'SpatialAudioPlayback']
     )
   end
