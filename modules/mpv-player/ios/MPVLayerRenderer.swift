@@ -118,9 +118,13 @@ final class MPVLayerRenderer {
 
     /// The tracks mpv passes through to the spatial output, in `audio-spdif`.
     private static let spatialAudioCodecs = ["truehd", "dts-hd"]
-    /// Those still passed through for this file, after any the library
+    /// Those still passed through for this track, after any the library
     /// refused. Read and written on `queue`.
     private var spatialAudioPassthrough: [String] = []
+    /// Dialogue boost and mono downmix are mpv filters, which passthrough
+    /// skips, so while either is on every track decodes to PCM. On `queue`.
+    private var dialogueBoost = false
+    private var monoDownmix = false
 
     /// Whether mpv's output is playing a track as spatial audio.
     var isPlayingSpatialAudio: Bool {
@@ -769,22 +773,31 @@ final class MPVLayerRenderer {
             // here, after any load or track switch queued before it.
             guard let self, let handle = self.mpv, Int(bitPattern: handle) == handleAddress, isCurrent() else { return }
             self.spatialAudioPassthrough.removeAll { $0 == codec }
-            self.setProperty(name: "audio-spdif", value: self.spatialAudioPassthrough.joined(separator: ","))
-            var aid: Int64 = 0
-            guard self.getProperty(handle: handle, name: "aid", format: MPV_FORMAT_INT64, value: &aid) >= 0, aid > 0 else { return }
             Logger.shared.log("Spatial audio: playing \(codec) as PCM for this track", type: "Info")
-            self.setProperty(name: "aid", value: "no")
-            self.setProperty(name: "aid", value: String(aid))
+            self.updateSpatialAudioPassthrough(reselect: true)
         }
     }
 
     /// A codec the library refused gets another try on the next track or file.
     private func restoreSpatialAudioPassthrough() {
         onQueue { [weak self] in
-            guard let self, self.spatialAudioSink != nil, self.spatialAudioPassthrough != Self.spatialAudioCodecs else { return }
+            guard let self else { return }
             self.spatialAudioPassthrough = Self.spatialAudioCodecs
-            self.setProperty(name: "audio-spdif", value: Self.spatialAudioCodecs.joined(separator: ","))
+            self.updateSpatialAudioPassthrough(reselect: false)
         }
+    }
+
+    /// Hands mpv the codecs to pass through. A new list alone leaves the
+    /// playing track as it is; selecting it again rebuilds its decoder and output.
+    private func updateSpatialAudioPassthrough(reselect: Bool) {
+        guard spatialAudioSink != nil, let handle = mpv else { return }
+        let codecs = (dialogueBoost || monoDownmix ? [] : spatialAudioPassthrough).joined(separator: ",")
+        guard getStringProperty(handle: handle, name: "audio-spdif") != codecs else { return }
+        setProperty(name: "audio-spdif", value: codecs)
+        var aid: Int64 = 0
+        guard reselect, getProperty(handle: handle, name: "aid", format: MPV_FORMAT_INT64, value: &aid) >= 0, aid > 0 else { return }
+        setProperty(name: "aid", value: "no")
+        setProperty(name: "aid", value: String(aid))
     }
 
     func applyPreset(_ preset: PlayerPreset) {
@@ -1517,6 +1530,11 @@ final class MPVLayerRenderer {
     /// is available. Gains are modest and net-neutral-ish so the float path
     /// cannot clip.
     func setDialogueBoost(_ enabled: Bool) {
+        onQueue { [weak self] in
+            guard let self else { return }
+            self.dialogueBoost = enabled
+            self.updateSpatialAudioPassthrough(reselect: true)
+        }
         if enabled {
             setProperty(
                 name: "af",
@@ -1530,6 +1548,11 @@ final class MPVLayerRenderer {
     /// Accessibility mono downmix — collapses all channels to a single one so
     /// both ears hear the full mix. "auto-safe" is mpv's default layout pick.
     func setMonoDownmix(_ enabled: Bool) {
+        onQueue { [weak self] in
+            guard let self else { return }
+            self.monoDownmix = enabled
+            self.updateSpatialAudioPassthrough(reselect: true)
+        }
         setProperty(name: "audio-channels", value: enabled ? "mono" : "auto-safe")
     }
     
