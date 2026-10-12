@@ -112,6 +112,25 @@ final class MPVLayerRenderer {
     /// restores exactly this instead of `auto`, so a device that was told to
     /// software-decode never gets silently promoted back to VideoToolbox.
     private var configuredHwdec = "videotoolbox"
+    /// The SpatialAudioSink mpv's `spatial` output calls, on tvOS 26; it must
+    /// outlive the handle.
+    private var spatialAudioSink: AnyObject?
+
+    /// The tracks mpv passes through to the spatial output, in `audio-spdif`.
+    private static let spatialAudioCodecs = ["truehd", "dts-hd"]
+    /// Those still passed through for this file, after any the library
+    /// refused. Read and written on `queue`.
+    private var spatialAudioPassthrough: [String] = []
+
+    /// Whether mpv's output is playing a track as spatial audio.
+    var isPlayingSpatialAudio: Bool {
+        #if os(tvOS)
+        if #available(tvOS 26, *) {
+            return (spatialAudioSink as? SpatialAudioSink)?.isOpen ?? false
+        }
+        #endif
+        return false
+    }
 
     weak var delegate: MPVLayerRendererDelegate?
     
@@ -360,7 +379,23 @@ final class MPVLayerRenderer {
         // labels mpv cannot map stays in as well. iOS is unchanged either way -
         // its autoprobe already picks audiounit ahead of avfoundation.
         #if os(tvOS)
-        checkError(mpv_set_option_string(handle, "ao", "audiounit"))
+        if #available(tvOS 26, *) {
+            // TrueHD and DTS-HD reach the app as passthrough and play as
+            // spatial audio (SpatialAudioSink); every other track, and any
+            // stream the sink fails on, is decoded to PCM for audiounit.
+            let handleAddress = Int(bitPattern: handle)
+            let sink = SpatialAudioSink { [weak self] codec, isCurrent in
+                self?.playAsPCM(codec, handleAddress: handleAddress, isCurrent: isCurrent)
+            }
+            spatialAudioSink = sink
+            spatialAudioPassthrough = Self.spatialAudioCodecs
+            var address = sink.address
+            checkError(mpv_set_option(handle, "ao-spatial-sink", MPV_FORMAT_INT64, &address))
+            checkError(mpv_set_option_string(handle, "audio-spdif", Self.spatialAudioCodecs.joined(separator: ",")))
+            checkError(mpv_set_option_string(handle, "ao", "spatial,audiounit"))
+        } else {
+            checkError(mpv_set_option_string(handle, "ao", "audiounit"))
+        }
         #endif
 
         // Subtitle and audio settings
@@ -590,6 +625,10 @@ final class MPVLayerRenderer {
             // been in a layer tree should be torn down on main, so the
             // release is spelled out there instead of left to that race.
             let pinnedLayer = Unmanaged.passRetained(displayLayer)
+            // The spatial output calls the sink through a raw address until
+            // the handle is destroyed, so it is pinned the same way.
+            let pinnedSink = spatialAudioSink.map { Unmanaged.passRetained($0) }
+            spatialAudioSink = nil
 
             // Quit + drain + destroy on the mpv queue WITHOUT blocking the
             // caller: stop() runs on main (dismiss/deinit), and a queue.sync
@@ -608,6 +647,7 @@ final class MPVLayerRenderer {
                     // Returns only once the core has joined the vo thread,
                     // so nothing in mpv can reach the layer after this.
                     mpv_terminate_destroy(handle)
+                    pinnedSink?.release()
                     // async, never sync: main may be the thread waiting on us.
                     DispatchQueue.main.async {
                         pinnedLayer.release()
@@ -669,6 +709,7 @@ final class MPVLayerRenderer {
             // Stop previous playback before loading new file
             self.command(handle, ["stop"])
             self.updateHTTPHeaders(headers)
+            self.restoreSpatialAudioPassthrough()
 
             // Set looping
             self.setProperty(name: "loop-file", value: loop ? "inf" : "no")
@@ -719,6 +760,33 @@ final class MPVLayerRenderer {
         }
     }
     
+    /// The library refused this track, so mpv decodes it to PCM until the next
+    /// track or file. Selecting it again rebuilds the decoder and output.
+    private func playAsPCM(_ codec: String, handleAddress: Int, isCurrent: @escaping @Sendable () -> Bool) {
+        onQueue { [weak self] in
+            // A failure from a handle since replaced, or from an output since
+            // closed by a track switch or the next item, is stale. Checked
+            // here, after any load or track switch queued before it.
+            guard let self, let handle = self.mpv, Int(bitPattern: handle) == handleAddress, isCurrent() else { return }
+            self.spatialAudioPassthrough.removeAll { $0 == codec }
+            self.setProperty(name: "audio-spdif", value: self.spatialAudioPassthrough.joined(separator: ","))
+            var aid: Int64 = 0
+            guard self.getProperty(handle: handle, name: "aid", format: MPV_FORMAT_INT64, value: &aid) >= 0, aid > 0 else { return }
+            Logger.shared.log("Spatial audio: playing \(codec) as PCM for this track", type: "Info")
+            self.setProperty(name: "aid", value: "no")
+            self.setProperty(name: "aid", value: String(aid))
+        }
+    }
+
+    /// A codec the library refused gets another try on the next track or file.
+    private func restoreSpatialAudioPassthrough() {
+        onQueue { [weak self] in
+            guard let self, self.spatialAudioSink != nil, self.spatialAudioPassthrough != Self.spatialAudioCodecs else { return }
+            self.spatialAudioPassthrough = Self.spatialAudioCodecs
+            self.setProperty(name: "audio-spdif", value: Self.spatialAudioCodecs.joined(separator: ","))
+        }
+    }
+
     func applyPreset(_ preset: PlayerPreset) {
         guard let handle = mpv else { return }
         queue.async { [weak self] in
@@ -1601,6 +1669,7 @@ final class MPVLayerRenderer {
             return
         }
         Logger.shared.log("setAudioTrack: setting aid to \(trackId)", type: "Info")
+        restoreSpatialAudioPassthrough()
         setProperty(name: "aid", value: String(trackId))
     }
     

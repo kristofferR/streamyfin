@@ -27,11 +27,17 @@ final class PlayerAudioSession {
 
 	/// Applies the playback category and activates the session. `completion`
 	/// runs on the main thread afterwards, whether or not the session took it.
-	func activate(completion: (() -> Void)? = nil) {
+	/// Spatial audio also advertises multichannel content, as SpatialAudioBridge
+	/// was tested with on Apple TV.
+	func activate(spatialAudio: Bool = false, completion: (() -> Void)? = nil) {
 		queue.async {
 			let session = AVAudioSession.sharedInstance()
 			do {
 				try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio, options: [])
+				#if os(tvOS)
+				// Never in the way of the activation below.
+				try? session.setSupportsMultichannelContent(spatialAudio)
+				#endif
 				try session.setActive(true)
 			} catch {
 				print("Failed to configure audio session: \(error)")
@@ -50,6 +56,11 @@ final class PlayerAudioSession {
 			let session = AVAudioSession.sharedInstance()
 			try? session.setActive(false, options: .notifyOthersOnDeactivation)
 			try? session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+			#if os(tvOS)
+			// Spatial audio's multichannel content would otherwise outlive it,
+			// for the theme music and anything else sharing the session.
+			try? session.setSupportsMultichannelContent(false)
+			#endif
 		}
 	}
 
