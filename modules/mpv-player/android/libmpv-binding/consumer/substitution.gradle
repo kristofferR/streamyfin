@@ -1,5 +1,25 @@
 // Future Expo withProjectBuildGradle addition; this source file lives in consumer/.
 allprojects { consumer ->
+    if (consumer.path in [':mpv-player', ':app']) {
+        consumer.tasks.register('verifyHostUsesSourceBinding') {
+            doLast {
+                def components = consumer.configurations.getByName('debugRuntimeClasspath')
+                        .incoming.resolutionResult.allComponents
+                def oldBinding = components.any {
+                    it.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                            it.id.group == 'dev.jdtech.mpv' && it.id.module == 'libmpv'
+                }
+                def sourceBindings = components.findAll {
+                    it.id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
+                            it.id.projectPath == ':streamyfin-libmpv-binding'
+                }
+                if (oldBinding || sourceBindings.size() != 1) {
+                    throw new GradleException("${consumer.path} must select only the source binding, never released binding classes/JNI")
+                }
+                logger.lifecycle("${consumer.path}: source-only libmpv selection verified")
+            }
+        }
+    }
     consumer.configurations.configureEach { configuration ->
         def rawInput = consumer.path == ':streamyfin-libmpv-binding' &&
                 configuration.name == 'releasedMediaCore'

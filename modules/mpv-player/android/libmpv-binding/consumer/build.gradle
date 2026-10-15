@@ -113,19 +113,6 @@ tasks.configureEach {
 }
 
 tasks.register('verifyHostUsesSourceBinding') {
-    doLast {
-        def components = project(':mpv-player').configurations.debugRuntimeClasspath
-                .incoming.resolutionResult.allComponents
-        def oldBinding = components.any {
-            it.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
-                    it.id.group == 'dev.jdtech.mpv' && it.id.module == 'libmpv'
-        }
-        def sourceBinding = components.any {
-            it.id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
-                    it.id.projectPath == ':streamyfin-libmpv-binding'
-        }
-        if (oldBinding || !sourceBinding) {
-            throw new GradleException('Host must select only the source binding, never the released binding classes/JNI')
-        }
-    }
+    // Gradle 9 requires resolution under the consuming project's task lock.
+    dependsOn ':mpv-player:verifyHostUsesSourceBinding', ':app:verifyHostUsesSourceBinding'
 }

@@ -11,6 +11,9 @@ The local END payload addition, unsupported-playlist behavior and baseline EOF l
 media cores, runtime-byte verification and pinned headers are unchanged.
 The following sections retain the source-consumption design and its validation
 requirements; implementation is not proof that those requirements have passed.
+See [GRADLE-evidence.md](GRADLE-evidence.md) for the recorded binding-level passes
+and the subsequent project-lock failure and correction. App runtime compatibility
+and the corrected source-only assertions remain separate validation gates.
 
 ## Consumption without a new binary release
 
