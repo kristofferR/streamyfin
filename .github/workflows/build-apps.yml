@@ -600,20 +600,41 @@ jobs:
                   }
               }
               info.cmakeCaches = []
+              info.cmakeProbeCaches = []
               info.nativeTools.each { tool ->
                   def project = gradle.rootProject.project(tool.project)
                   def caches = project.fileTree(dir: project.projectDir, includes: ['.cxx/**/CMakeCache.txt']).files.sort { it.path }
                   if (caches.isEmpty()) throw new GradleException("Missing actual CMake caches for ${project.path}")
-                  caches.each { cache ->
+                  def entries = caches.collect { cache ->
                       def values = [:]
                       cache.eachLine { line ->
-                          def matcher = line =~ /^(CMAKE_COMMAND|CMAKE_CXX_COMPILER|CMAKE_C_COMPILER|CMAKE_MAKE_PROGRAM|ANDROID_ABI):[^=]+=(.*)$/
+                          def matcher = line =~ /^(CMAKE_COMMAND|CMAKE_CXX_COMPILER|CMAKE_C_COMPILER|CMAKE_MAKE_PROGRAM|CMAKE_HOME_DIRECTORY|ANDROID_ABI):[^=]+=(.*)$/
                           if (matcher.matches()) values[matcher[0][1]] = matcher[0][2]
                       }
                       values.project = project.path
                       values.cache = cache.canonicalPath
-                      info.cmakeCaches.add(values) // Retain rejected evidence too.
+                      values
+                  }
+                  def source = project.extensions.getByName('android').externalNativeBuild.cmake.path.parentFile.canonicalFile
+                  def producers = entries.findAll { it.CMAKE_HOME_DIRECTORY && new File(it.CMAKE_HOME_DIRECTORY).canonicalFile == source }
+                  def probes = entries - producers
+                  info.cmakeCaches.addAll(producers)
+                  info.cmakeProbeCaches.addAll(probes) // Retain rejected and nested probe evidence too.
+                  if (producers.isEmpty()) throw new GradleException("Missing actual producer cache for ${project.path}: ${source}")
+                  entries.each { values ->
                       if (new File(values.CMAKE_COMMAND ?: '').canonicalPath != tool.cmakeExecutable) throw new GradleException("Unexpected actual CMake for ${project.path}")
+                  }
+                  probes.each { values ->
+                      // LTO/try_compile caches belong to a producer's CMakeFiles tree, not another app ABI.
+                      def owned = producers.any { producer ->
+                          def prefix = new File(new File(producer.cache).parentFile, 'CMakeFiles').canonicalPath + '/'
+                          values.cache.startsWith(prefix) && values.CMAKE_HOME_DIRECTORY &&
+                                  new File(values.CMAKE_HOME_DIRECTORY).canonicalPath.startsWith(prefix)
+                      }
+                      if (!owned) throw new GradleException("Unrecognized non-producer CMake cache: ${values.cache}")
+                  }
+                  producers.each { values ->
+                      def cache = new File(values.cache)
                       // NDK sets this as a normal variable; CMake persists it in its compiler record, not necessarily the cache.
                       def records = project.fileTree(dir: cache.parentFile,
                               includes: ['CMakeFiles/*/CMakeCXXCompiler.cmake']).files.sort { it.path }
