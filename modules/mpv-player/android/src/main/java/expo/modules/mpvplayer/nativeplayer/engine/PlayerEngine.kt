@@ -81,6 +81,11 @@ interface PlayerEngine {
 
     // MARK: - Loading
     fun load(config: VideoLoadConfig)
+    /** Acknowledge after file/track preparation, when post-load mutations are safe. */
+    fun load(config: VideoLoadConfig, onLoaded: () -> Unit) {
+        load(config)
+        onLoaded()
+    }
     fun reloadCurrentItem()
 
     // MARK: - Transport

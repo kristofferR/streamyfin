@@ -11,22 +11,35 @@ final class DeliveryQueue {
         while !pending.isEmpty { pending.removeFirst()() }
     }
 }
-final class MPVLayerRenderer {}
+final class MPVLayerRenderer { func stop() {} }
+final class DisplayLayer { func removeFromSuperlayer() {} }
+final class AudioSession { func tearDown() {} }
 final class PipController {
     var isPictureInPictureActive = true
     var position = 0.0
     var rate = 1.0
     func setCurrentTimeFromSeconds(_ value: Double) { position = value }
     func setPlaybackRate(_ value: Double) { rate = value }
+    func stopPictureInPicture() {}
 }
 final class ProgressDelegate {
+    var errors: [String] = []
+    var readiness: [Bool] = []
+    var loading: [Bool] = []
     var positions: [Double] = []
     var pauses: [Bool] = []
     func engine(_ engine: MPVPlayerEngine, didUpdateProgress position: Double,
                 duration: Double, cacheSeconds: Double) { positions.append(position) }
     func engine(_ engine: MPVPlayerEngine, didChangePause paused: Bool) { pauses.append(paused) }
+    func engine(_ engine: MPVPlayerEngine, didFailWithError message: String) { errors.append(message) }
+    func engine(_ engine: MPVPlayerEngine, didBecomeReadyToSeek ready: Bool) { readiness.append(ready) }
+    func engine(_ engine: MPVPlayerEngine, didChangeLoading value: Bool) { loading.append(value) }
 }
 final class MPVPlayerEngine {
+    var isShutDown = false
+    var renderer: MPVLayerRenderer? = MPVLayerRenderer()
+    var displayLayer = DisplayLayer()
+    var audioSession = AudioSession()
     var loadGeneration: UInt = 1
     var cachedPosition = 0.0
     var cachedDuration = 0.0
@@ -34,6 +47,8 @@ final class MPVPlayerEngine {
     var delegate: ProgressDelegate? = ProgressDelegate()
     var nowPlaying: [Bool] = []
     func syncNowPlaying(isPlaying: Bool) { nowPlaying.append(isPlaying) }
+    func clearNowPlayingInfo() {}
+    func setPictureInPictureAutoStartEnabled(_ enabled: Bool) {}
 }
 
 @main
@@ -84,6 +99,25 @@ struct ProgressGenerationTests {
         engine.loadGeneration = 6 // shutdown invalidates pause delivery too
         DispatchQueue.main.drain()
         precondition(engine.pipController?.rate == 0 && engine.delegate!.pauses == [true])
-        print("Native progress and pause final-delivery generations passed")
+        engine.renderer(renderer, didFailWithError: "old overflow", loadGeneration: 6)
+        engine.loadGeneration = 7
+        DispatchQueue.main.drain()
+        precondition(engine.delegate!.errors.isEmpty && engine.delegate!.readiness.isEmpty && engine.delegate!.loading.isEmpty,
+                     "a stale overflow cannot change replacement readiness/loading or show its error")
+        engine.renderer(renderer, didFailWithError: "current overflow", loadGeneration: 7)
+        DispatchQueue.main.drain()
+        precondition(engine.delegate!.errors == ["current overflow"] && engine.delegate!.readiness == [false]
+                     && engine.delegate!.loading == [false], "an accepted overflow reaches the existing error path")
+        engine.renderer(renderer, didFailWithError: "shutdown overflow", loadGeneration: 7)
+        engine.renderer(renderer, didUpdatePosition: 900, duration: 1800, cacheSeconds: 2, loadGeneration: 7)
+        engine.renderer(renderer, didChangePause: false, loadGeneration: 7)
+        engine.shutdown() // Actual production shutdown body, not a simulated increment.
+        DispatchQueue.main.drain()
+        precondition(engine.loadGeneration == 8 && engine.delegate!.errors == ["current overflow"]
+                     && engine.cachedPosition == 30 && engine.delegate!.pauses == [true],
+                     "actual shutdown suppresses queued error, progress and pause delivery")
+        engine.shutdown()
+        precondition(engine.loadGeneration == 8, "shutdown remains idempotent")
+        print("Native progress, pause and terminal-error final-delivery generations passed")
     }
 }

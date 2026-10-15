@@ -17,10 +17,12 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
     private var bindingPending = false
     private var overflowed = false
     private var invalidated = false
+    private var loadCompletion: (() -> Unit)? = null
     private val early = mutableListOf<Receipt<H, F, E>>()
 
-    @Synchronized fun begin(handle: H): Request<H> {
+    @Synchronized fun begin(handle: H, onLoaded: () -> Unit = {}): Request<H> {
         clear()
+        loadCompletion = onLoaded
         return Request(handle).also { request = it; bindingPending = true }
     }
 
@@ -48,12 +50,19 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
         bindingPending = false
         this.file = if (overflowed) null else file
         invalidated = this.file == null
+        if (invalidated) loadCompletion = null
         val retained = early.filter { it.file == this.file }
         early.clear()
         return Binding(this.file != null, retained)
     }
 
     @Synchronized fun isCurrent(request: Request<H>): Boolean = this.request === request && !invalidated
+
+    /** Take only after this file's FILE_LOADED preparation; invoke outside the lock. */
+    @Synchronized fun takeLoadCompletion(receipt: Receipt<H, F, E>): (() -> Unit)? {
+        if (!isCurrent(receipt)) return null
+        return loadCompletion.also { loadCompletion = null }
+    }
 
     /** A failed request may still report its error, until replaced or stopped. */
     @Synchronized fun owns(request: Request<H>): Boolean = this.request === request
@@ -66,6 +75,7 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
         invalidated = true
         file = null
         bindingPending = false
+        loadCompletion = null
         early.clear()
         return current
     }
@@ -76,6 +86,7 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
         bindingPending = false
         overflowed = false
         invalidated = false
+        loadCompletion = null
         early.clear()
     }
 }

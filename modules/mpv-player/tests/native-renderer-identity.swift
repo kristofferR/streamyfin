@@ -14,10 +14,16 @@ final class DeliveryQueue {
     }
 }
 final class RendererDelegate {
+    var errors: [String] = []
+    var errorGenerations: [UInt] = []
     var pauses: [Bool] = []
     var generations: [UInt] = []
     var progress: [Double] = []
     var durations: [Double] = []
+    func renderer(_ renderer: MPVLayerRenderer, didFailWithError message: String, loadGeneration: UInt) {
+        errors.append(message)
+        errorGenerations.append(loadGeneration)
+    }
     func renderer(_ renderer: MPVLayerRenderer, didChangePause paused: Bool, loadGeneration: UInt) {
         pauses.append(paused)
         generations.append(loadGeneration)
@@ -34,6 +40,9 @@ final class MPVLayerRenderer {
     var cachedDuration = 0.0
     var cachedCacheSeconds = 0.0
     var isPaused = true
+    var isReadyToSeek = true
+    var isSeeking = true
+    var isLoading = true
     var delegate: RendererDelegate? = RendererDelegate()
 }
 
@@ -177,6 +186,39 @@ struct RendererIdentityTests {
         DispatchQueue.main.drain()
         precondition(pauseRenderer.isPaused && pauseRenderer.delegate!.pauses == [false, true, false, true],
                      "an unowned pause cannot change the cache or notify a new session")
-        print("Renderer native identity, C decoding and progress/pause receipts passed")
+        let overflowRenderer = MPVLayerRenderer()
+        overflowRenderer.fileIdentity.begin(handle: handle, generation: 11)
+        // No START_FILE or command result yet: the request still owns failure.
+        overflowRenderer.handleQueueOverflow(source: handle)
+        precondition(!overflowRenderer.isReadyToSeek && !overflowRenderer.isSeeking && !overflowRenderer.isLoading)
+        overflowRenderer.fileIdentity.bind(handle: handle, generation: 11, entryID: 22)
+        overflowRenderer.fileIdentity.start(handle: handle, entryID: 22)
+        precondition(overflowRenderer.captureProgress(named: "time-pos", value: 900) == nil,
+                     "late native events cannot resurrect identity after overflow")
+        overflowRenderer.handleQueueOverflow(source: handle)
+        DispatchQueue.main.drain()
+        precondition(overflowRenderer.delegate!.errorGenerations == [11],
+                     "pre-START overflow reports one explicit error for the owning generation")
+
+        overflowRenderer.fileIdentity.begin(handle: handle, generation: 12)
+        overflowRenderer.fileIdentity.bind(handle: handle, generation: 12, entryID: 23)
+        overflowRenderer.fileIdentity.start(handle: handle, entryID: 23)
+        overflowRenderer.handleQueueOverflow(source: MPVFileIdentity.Handle())
+        precondition(overflowRenderer.captureProgress(named: "time-pos", value: 130) != nil,
+                     "an old handle's overflow cannot invalidate the new file")
+        overflowRenderer.handleQueueOverflow(source: handle)
+        precondition(overflowRenderer.captureProgress(named: "time-pos", value: 900) == nil)
+        DispatchQueue.main.drain()
+        precondition(overflowRenderer.delegate!.errorGenerations == [11, 12])
+        overflowRenderer.fileIdentity.begin(handle: handle, generation: 13)
+        overflowRenderer.fileIdentity.bind(handle: handle, generation: 13, entryID: 24)
+        overflowRenderer.fileIdentity.start(handle: handle, entryID: 24)
+        precondition(overflowRenderer.captureProgress(named: "time-pos", value: 140)?.identity.loadGeneration == 13,
+                     "an explicit new load can report after terminal overflow")
+        overflowRenderer.fileIdentity.clear() // Shutdown before a late overflow.
+        overflowRenderer.handleQueueOverflow(source: handle)
+        DispatchQueue.main.drain()
+        precondition(overflowRenderer.delegate!.errorGenerations == [11, 12])
+        print("Renderer native identity, C decoding, progress/pause receipts and terminal overflow passed")
     }
 }

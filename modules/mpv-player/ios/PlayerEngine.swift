@@ -378,6 +378,7 @@ final class MPVPlayerEngine: NSObject {
 	func shutdown() {
 		guard !isShutDown else { return }
 		isShutDown = true
+		loadGeneration &+= 1
 		setPictureInPictureAutoStartEnabled(false)
 		pipController?.stopPictureInPicture()
 		pipController = nil
@@ -708,6 +709,15 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 			self.pipController?.setPlaybackRate(isPaused ? 0.0 : 1.0)
 			self.syncNowPlaying(isPlaying: !isPaused)
 			self.delegate?.engine(self, didChangePause: isPaused)
+		}
+	}
+
+	func renderer(_: MPVLayerRenderer, didFailWithError message: String, loadGeneration: UInt) {
+		DispatchQueue.main.async { [weak self] in
+			guard let self, loadGeneration == self.loadGeneration else { return }
+			self.delegate?.engine(self, didBecomeReadyToSeek: false)
+			self.delegate?.engine(self, didChangeLoading: false)
+			self.delegate?.engine(self, didFailWithError: message)
 		}
 	}
 

@@ -680,7 +680,15 @@ class NativePlayerSession(
             return
         }
 
-        engine?.load(loadConfig)
+        // A sidecar re-added by JS onLoad must follow native FILE_LOADED track
+        // preparation. Keep autoplay/setup immediate so readiness can be reached.
+        val acknowledgement = LoadAcknowledgement {
+            emit(
+                "onLoad",
+                mapOf("url" to loadConfig.url, "muted" to viewModel.isMuted, "isPlaying" to loadConfig.autoplay),
+            )
+        }
+        engine?.load(loadConfig, acknowledgement::filePrepared)
 
         // mpv's pause property is global and survives loadfile, and keep-open=
         // always leaves it paused at EOF — so a swap into the next episode
@@ -703,21 +711,7 @@ class NativePlayerSession(
         config.subtitleStyle?.let { applySubtitleStyle(it) }
         viewModel.applyZoomState()
         mediaSessionController?.updateMetadata()
-
-        // The engine has taken the stream — JS clears session.awaitingLoad on
-        // this, and every awaitingLoad-gated listener (progress reporting,
-        // next/previous episode, episode selection, quality, track changes)
-        // stays dead until it fires. Mirror of PlayerEngine.swift's
-        // `delegate?.engine(self, didLoad:)` at the end of load().
-        // Mute rides along: it is a device/session state, not a stream one, so
-        // JS has no other way to learn it for a player opened while already
-        // muted — no transition happens, so no onMuteStateChanged fires. The
-        // play state rides along for the same reason: a stream swapped in while
-        // the player plays never pauses or resumes.
-        emit(
-            "onLoad",
-            mapOf("url" to loadConfig.url, "muted" to viewModel.isMuted, "isPlaying" to loadConfig.autoplay),
-        )
+        acknowledgement.configured()
     }
 
     private fun applySubtitleStyle(style: SubtitleStyleRecord) {

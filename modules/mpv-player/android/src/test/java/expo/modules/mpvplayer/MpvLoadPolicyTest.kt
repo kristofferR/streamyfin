@@ -8,6 +8,55 @@ class MpvLoadPolicyTest {
     private fun policy() = MpvLoadPolicy<Any, FileId, MpvEventSnapshot>()
     private val loaded = MpvEventSnapshot.Event(8, 0, null)
 
+    @Test fun bindingAndEarlyReadinessCannotAcknowledgeBeforeFilePreparation() {
+        val policy = policy()
+        val handle = Any()
+        val file = FileId(handle, 1)
+        val events = mutableListOf<String>()
+        val acknowledgement = expo.modules.mpvplayer.nativeplayer.LoadAcknowledgement {
+            assertFalse(Thread.holdsLock(policy))
+            events.add("onLoad/sub-add")
+        }
+        val request = policy.begin(handle, acknowledgement::filePrepared)
+        acknowledgement.configured() // Autoplay/setup never waits for FILE_LOADED.
+        policy.receive(handle, file, loaded, true)
+        val binding = policy.bind(request, file)
+        assertTrue(binding.accepted)
+        assertTrue(events.isEmpty()) // mpv_command_ret is not file readiness.
+        val receipt = binding.receipts.single()
+        events.add("initial subtitles/selection complete")
+        policy.takeLoadCompletion(receipt)?.invoke()
+        events.add("tracksReady")
+        assertNull(policy.takeLoadCompletion(receipt))
+        assertEquals(listOf("initial subtitles/selection complete", "onLoad/sub-add", "tracksReady"), events)
+    }
+
+    @Test fun replacedRejectedAndStoppedPreparationsCannotAcknowledge() {
+        val policy = policy()
+        val handle = Any()
+        var acknowledgements = 0
+        val first = policy.begin(handle) { acknowledgements++ }
+        val file = FileId(handle, 1)
+        policy.bind(first, file)
+        val queued = policy.receive(handle, file, loaded, true)!!
+        // The same URL may be reloaded while preparation is on the worker.
+        val replacement = policy.begin(handle) { acknowledgements++ }
+        assertNull(policy.takeLoadCompletion(queued))
+        assertFalse(policy.bind(replacement, null).accepted)
+        assertNull(policy.takeLoadCompletion(queued))
+        val next = policy.begin(handle) { acknowledgements++ }
+        policy.bind(next, FileId(handle, 2))
+        val stopped = policy.receive(handle, FileId(handle, 2), loaded, true)!!
+        policy.clear()
+        assertNull(policy.takeLoadCompletion(stopped))
+        val newHandle = Any()
+        policy.bind(policy.begin(newHandle) { acknowledgements++ }, FileId(newHandle, 2))
+        assertNull(policy.takeLoadCompletion(stopped))
+        val current = policy.receive(newHandle, FileId(newHandle, 2), loaded, true)!!
+        policy.takeLoadCompletion(current)?.invoke()
+        assertEquals(1, acknowledgements)
+    }
+
     @Test fun skippedAndArbitrarilyOrderedStartsBindOnlyTheReturnedEntry() {
         val policy = policy()
         val handle = Any()

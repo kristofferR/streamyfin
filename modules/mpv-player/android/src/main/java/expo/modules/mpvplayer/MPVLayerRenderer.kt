@@ -661,9 +661,11 @@ class MPVLayerRenderer(
         }
     }
     
-    override fun load(config: VideoLoadConfig) {
+    override fun load(config: VideoLoadConfig) = load(config) {}
+
+    override fun load(config: VideoLoadConfig, onLoaded: () -> Unit) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { load(config) }
+            mainHandler.post { load(config, onLoaded) }
             return
         }
         val loadConfig = config.copy(
@@ -672,7 +674,7 @@ class MPVLayerRenderer(
         )
         val handle = mpv ?: return
         // Invalidate old receipts before issuing any synchronous JNI command.
-        val request = loadPolicy.begin(handle)
+        val request = loadPolicy.begin(handle, onLoaded)
         invalidateSeekReports()
         val url = loadConfig.url
         currentUrl = url
@@ -1360,6 +1362,10 @@ class MPVLayerRenderer(
                         audioId?.let { if (it > 0) handle.setPropertyInt("aid", it) }
                         selectSubtitle(handle, subtitleId)
                         mainHandler.post {
+                            if (!isCurrent(receipt)) return@post
+                            // A returned entry ID alone is not readiness. JS may
+                            // now sub-add/select: all initial track work is done.
+                            loadPolicy.takeLoadCompletion(receipt)?.invoke()
                             if (!isCurrent(receipt)) return@post
                             notify(receipt) { it.onTracksReady() }
                             if (!isCurrent(receipt)) return@post

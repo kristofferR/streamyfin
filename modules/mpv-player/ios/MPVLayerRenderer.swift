@@ -15,6 +15,7 @@ enum HDRMode {
 protocol MPVLayerRendererDelegate: AnyObject {
     func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, loadGeneration: UInt)
     func renderer(_ renderer: MPVLayerRenderer, didChangePause isPaused: Bool, loadGeneration: UInt)
+    func renderer(_ renderer: MPVLayerRenderer, didFailWithError message: String, loadGeneration: UInt)
     func renderer(_ renderer: MPVLayerRenderer, didChangeLoading isLoading: Bool)
     func renderer(_ renderer: MPVLayerRenderer, didBecomeReadyToSeek: Bool)
     func renderer(_ renderer: MPVLayerRenderer, didBecomeTracksReady: Bool)
@@ -1044,7 +1045,7 @@ final class MPVLayerRenderer {
             }
 
         case MPV_EVENT_QUEUE_OVERFLOW:
-            fileIdentity.clear()
+            handleQueueOverflow(source: source)
             Logger.shared.log("mpv event queue overflow; file identity invalidated", type: "Warn")
 
         case MPV_EVENT_SHUTDOWN:
@@ -1077,6 +1078,20 @@ final class MPVLayerRenderer {
         }
     }
     
+    private func handleQueueOverflow(source: MPVFileIdentity.Handle) {
+        // Even before START_FILE, the accepted request owns this failure.
+        // Guessing a new file identity from current properties is unsafe.
+        guard let generation = fileIdentity.invalidate(handle: source) else { return }
+        isReadyToSeek = false
+        isSeeking = false
+        isLoading = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.renderer(self, didFailWithError: "mpv event stream lost file identity",
+                                    loadGeneration: generation)
+        }
+    }
+
     private static func eventDouble(_ property: mpv_event_property) -> Double? {
         guard property.format == MPV_FORMAT_DOUBLE, let data = property.data else { return nil }
         return data.assumingMemoryBound(to: Double.self).pointee

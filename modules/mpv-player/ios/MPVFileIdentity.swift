@@ -44,6 +44,13 @@ struct MPVFileIdentity {
         startedEntryID = nil
     }
 
+    mutating func invalidate(handle: Handle) -> UInt? {
+        guard requestedHandle === handle else { return nil }
+        let generation = requestedGeneration
+        clear()
+        return generation
+    }
+
     var receipt: Receipt? {
         guard let handle = requestedHandle, startedHandle === handle,
               let entryID = requestedEntryID, startedEntryID == entryID else { return nil }
