@@ -88,12 +88,20 @@ const decoded = (url: string) => {
   }
 };
 
+const canonicalStreamUrl = (url: string) => {
+  try {
+    return decoded(new URL(url).href);
+  } catch {
+    return decoded(url);
+  }
+};
+
 /**
  * Whether a native onLoad names the stream JS asked for. iOS echoes the URL
  * through Foundation, which percent-encodes characters JS passed raw.
  */
 export const isSameStreamUrl = (a: string, b: string): boolean =>
-  a === b || decoded(a) === decoded(b);
+  a === b || canonicalStreamUrl(a) === canonicalStreamUrl(b);
 
 type Coordinator = ReturnType<typeof useSyncPlay>;
 

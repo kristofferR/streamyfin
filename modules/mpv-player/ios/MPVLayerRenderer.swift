@@ -13,7 +13,7 @@ enum HDRMode {
 }
 
 protocol MPVLayerRendererDelegate: AnyObject {
-    func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double)
+    func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, loadGeneration: UInt)
     func renderer(_ renderer: MPVLayerRenderer, didChangePause isPaused: Bool)
     func renderer(_ renderer: MPVLayerRenderer, didChangeLoading isLoading: Bool)
     func renderer(_ renderer: MPVLayerRenderer, didBecomeReadyToSeek: Bool)
@@ -1029,9 +1029,12 @@ final class MPVLayerRenderer {
             let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_DOUBLE, value: &value)
             if status >= 0 {
                 cachedDuration = value
+                let generation = activeLoadGeneration
+                let position = cachedPosition
+                let cacheSeconds = cachedCacheSeconds
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.delegate?.renderer(self, didUpdatePosition: self.cachedPosition, duration: self.cachedDuration, cacheSeconds: self.cachedCacheSeconds)
+                    self.delegate?.renderer(self, didUpdatePosition: position, duration: value, cacheSeconds: cacheSeconds, loadGeneration: generation)
                 }
             }
         case "time-pos":
@@ -1044,9 +1047,12 @@ final class MPVLayerRenderer {
                 let shouldUpdate = isSeeking || (now - lastProgressUpdateTime >= 1.0)
                 if shouldUpdate {
                     lastProgressUpdateTime = now
+                    let generation = activeLoadGeneration
+                    let duration = cachedDuration
+                    let cacheSeconds = cachedCacheSeconds
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
-                        self.delegate?.renderer(self, didUpdatePosition: self.cachedPosition, duration: self.cachedDuration, cacheSeconds: self.cachedCacheSeconds)
+                        self.delegate?.renderer(self, didUpdatePosition: value, duration: duration, cacheSeconds: cacheSeconds, loadGeneration: generation)
                     }
                 }
             }
@@ -1076,10 +1082,11 @@ final class MPVLayerRenderer {
                         ? physicalPosition : nil
                     let duration = cachedDuration
                     let cacheSeconds = cachedCacheSeconds
+                    let generation = activeLoadGeneration
                     DispatchQueue.main.async { [weak self] in
                         guard let self else { return }
                         if let pausedPosition {
-                            self.delegate?.renderer(self, didUpdatePosition: pausedPosition, duration: duration, cacheSeconds: cacheSeconds)
+                            self.delegate?.renderer(self, didUpdatePosition: pausedPosition, duration: duration, cacheSeconds: cacheSeconds, loadGeneration: generation)
                         }
                         self.delegate?.renderer(self, didChangePause: newPaused)
                     }

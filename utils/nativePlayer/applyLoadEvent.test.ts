@@ -61,6 +61,18 @@ describe("applyLoadEvent", () => {
     expect(s.awaitingLoad).toBe(false);
   });
 
+  test("accepts Foundation's IDNA spelling of the requested server", () => {
+    const s = fresh();
+    s.stream.url = "https://bücher.example/video";
+    expect(
+      applyLoadEvent(s, {
+        url: "https://xn--bcher-kva.example/video",
+        isPlaying: true,
+      }),
+    ).toBe(true);
+    expect(s.awaitingLoad).toBe(false);
+  });
+
   test("an event without a usable URL keeps the legacy load behavior", () => {
     const s = fresh();
     expect(applyLoadEvent(s, { url: "", isPlaying: true })).toBe(true);

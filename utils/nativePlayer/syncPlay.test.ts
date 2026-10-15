@@ -151,6 +151,15 @@ test("native state preserves playlist identities for duplicate media", () => {
 });
 
 describe("isSameStreamUrl", () => {
+  test("matches Foundation's IDNA hostname and default-port normalization", () => {
+    expect(
+      isSameStreamUrl(
+        "https://bücher.example:443/video",
+        "https://xn--bcher-kva.example/video",
+      ),
+    ).toBe(true);
+  });
+
   test("matches a URL the native side percent-encoded", () => {
     expect(
       isSameStreamUrl(

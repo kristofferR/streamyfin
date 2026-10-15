@@ -684,12 +684,13 @@ final class MPVPlayerEngine: NSObject {
 // MARK: - MPVLayerRendererDelegate
 
 extension MPVPlayerEngine: MPVLayerRendererDelegate {
-	func renderer(_: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double) {
-		cachedPosition = position
-		cachedDuration = duration
-
+	func renderer(_: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, loadGeneration: UInt) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			// The renderer stamped this on its mpv queue. A load or shutdown
+			// since then makes the entire callback belong to an old timeline.
+			guard let self, loadGeneration == self.loadGeneration else { return }
+			self.cachedPosition = position
+			self.cachedDuration = duration
 
 			if self.pipController?.isPictureInPictureActive == true {
 				self.pipController?.setCurrentTimeFromSeconds(position)
