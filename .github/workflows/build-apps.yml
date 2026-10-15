@@ -32,8 +32,8 @@ jobs:
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: 0d58a5cb47202b2f2db7d7430f37b029c8c00e26
-      PROGRESS_TREE: f48b9b35c935098afb9d61f82c30f2a2490ac21a
+      PROGRESS_REF: 285a2127bdba8a7991e2908c4b5a057390be2ab8
+      PROGRESS_TREE: 5c590aee3fdcbd8bd2378a26309fb6ca94b28eec
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
     steps:
       - name: Checkout audited validation branch
@@ -158,8 +158,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: 0d58a5cb47202b2f2db7d7430f37b029c8c00e26
-      PROGRESS_TREE: f48b9b35c935098afb9d61f82c30f2a2490ac21a
+      PROGRESS_REF: 285a2127bdba8a7991e2908c4b5a057390be2ab8
+      PROGRESS_TREE: 5c590aee3fdcbd8bd2378a26309fb6ca94b28eec
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
