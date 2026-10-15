@@ -38,10 +38,14 @@ through eager configuration-time artifact access. The old `classes.jar` and
 
 Only Kotlin and `libplayer.so` are rebuilt. CMake imports released `libmpv.so`
 and `libavcodec.so` outside `jniLibs`; other released native libraries go into
-`jniLibs` once. NDK supplies `libc++_shared.so`. Verification requires the packaged
-runtime and every media core to remain byte-identical to the released AAR; a
-runtime mismatch stops validation instead of silently changing it. There are
-no `pickFirst` rules hiding duplicate libraries.
+`jniLibs` once. The local runtime proposal imports released `libc++_shared.so`
+for both linking and AAR packaging, using the pinned NDK's headers with automatic
+STL linking disabled. Verification still requires the runtime and every media
+core to remain byte-identical to the released AAR. No packaging workaround is
+added. The host's existing RN policy selects its app-native runtime independently;
+binding AAR consistency does not prove final app compatibility. See
+[RUNTIME-evidence.md](RUNTIME-evidence.md) for the separate claims, static baseline
+comparison, proposed cloud checks and unproven boundaries.
 
 If this source-build route is declined, an immutable, reviewed replacement AAR
 would be a separate release blocker. This preparation does not authorize one.

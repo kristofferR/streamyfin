@@ -39,7 +39,7 @@ def prepareReleasedMediaCore = tasks.register('prepareReleasedMediaCore') {
         copy {
             from zipTree(artifact)
             into output
-            include 'jni/**/libmpv.so', 'jni/**/libavcodec.so'
+            include 'jni/**/libmpv.so', 'jni/**/libavcodec.so', 'jni/**/libc++_shared.so'
             eachFile { path = path.replaceFirst('^jni/', 'cmake/') }
             includeEmptyDirs = false
         }
@@ -75,7 +75,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DRELEASED_MEDIA_ROOT=${nativeInputs.get().asFile.absolutePath}",
-                        '-DANDROID_STL=c++_shared'
+                        '-DANDROID_STL=none'
                 cppFlags '-std=c++11'
             }
         }
