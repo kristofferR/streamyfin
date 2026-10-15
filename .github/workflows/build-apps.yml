@@ -612,9 +612,26 @@ jobs:
                       }
                       values.project = project.path
                       values.cache = cache.canonicalPath
+                      info.cmakeCaches.add(values) // Retain rejected evidence too.
                       if (new File(values.CMAKE_COMMAND ?: '').canonicalPath != tool.cmakeExecutable) throw new GradleException("Unexpected actual CMake for ${project.path}")
-                      if (!new File(values.CMAKE_CXX_COMPILER ?: '').canonicalPath.startsWith(tool.ndkRoot + '/toolchains/llvm/')) throw new GradleException("Unexpected compiler for ${project.path}")
-                      info.cmakeCaches.add(values)
+                      // NDK sets this as a normal variable; CMake persists it in its compiler record, not necessarily the cache.
+                      def records = project.fileTree(dir: cache.parentFile,
+                              includes: ['CMakeFiles/*/CMakeCXXCompiler.cmake']).files.sort { it.path }
+                      values.compilerRecords = records.collect { it.canonicalPath }
+                      if (records.size() != 1) throw new GradleException("Expected one actual CXX compiler record for ${cache}")
+                      def compilers = records[0].readLines().findResults { line ->
+                          def matcher = line =~ /^set\(CMAKE_CXX_COMPILER "([^"]+)"\)$/
+                          matcher.matches() ? matcher[0][1] : null
+                      }
+                      values.compilerRecordValues = compilers
+                      if (compilers.size() != 1) throw new GradleException("Missing or ambiguous actual CXX compiler in ${records[0]}")
+                      def actual = new File(compilers[0]).canonicalFile
+                      def expected = new File(tool.ndkRoot, 'toolchains/llvm/prebuilt/linux-x86_64/bin/clang++').canonicalFile
+                      values.resolvedCxxCompiler = actual.path
+                      if (!actual.isFile() || actual != expected) throw new GradleException("Unexpected compiler for ${project.path}: ${actual}")
+                      if (values.CMAKE_CXX_COMPILER && new File(values.CMAKE_CXX_COMPILER).canonicalFile != actual) {
+                          throw new GradleException("Cache/compiler-record disagreement for ${project.path}")
+                      }
                   }
               }
               def appCaches = info.cmakeCaches.findAll { it.project == ':app' }
