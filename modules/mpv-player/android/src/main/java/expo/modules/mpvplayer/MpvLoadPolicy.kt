@@ -77,6 +77,11 @@ internal class MpvLoadPolicy<H : Any> {
         if (terminal != null) {
             // An ordinary END may await preparation. A later explicit failure
             // or cancellation still cancels it; no further START can revive it.
+            if (stage != Stage.TERMINAL && event is MpvEventSnapshot.Event && event.id == MPVLib.MPV_EVENT_START_FILE) {
+                this.file = null
+                loadCompletion = null
+                return null
+            }
             if (stage != Stage.TERMINAL && event is MpvEventSnapshot.EndFile &&
                 event.reason != MPVLib.MPV_END_FILE_REASON_EOF && this.file == file) {
                 val receipt = Receipt(request, file, event, epoch, pauseRevision)

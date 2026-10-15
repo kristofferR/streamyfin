@@ -242,7 +242,7 @@ class MpvLoadPolicyTest {
     }
 
     @Test fun deferredOrdinaryEndCannotReviveCancelledPreparationOrCrossOnLoadReplacement() {
-        for (change in listOf("error", "redirect", "stop", "quit", "replacement", "shutdown", "onLoad replacement")) {
+        for (change in listOf("error", "redirect", "stop", "quit", "replacement", "shutdown", "unexpected start", "onLoad replacement")) {
             val policy = policy()
             val handle = Any()
             val file = MpvFileKey(handle, 1)
@@ -261,6 +261,7 @@ class MpvLoadPolicyTest {
                 "quit" -> policy.receive(handle, file, end(3), true)
                 "replacement" -> policy.begin(handle)
                 "shutdown" -> policy.invalidate(handle)
+                "unexpected start" -> policy.receive(handle, MpvFileKey(handle, 2), start(), true)
             }
             policy.takeLoadCompletion(ready)?.invoke()
             assertEquals(if (change == "onLoad replacement") 1 else 0, loads)
