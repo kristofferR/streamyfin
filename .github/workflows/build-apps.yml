@@ -32,8 +32,8 @@ jobs:
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: a1ce748fb9336be8f98363a8388ae5be12155fc3
-      PROGRESS_TREE: 04c4862ba69548079fd5ba92028b1db792b9e70f
+      PROGRESS_REF: d07a3a4f3eee3a20a56aae5d7edec5d782bbf0a8
+      PROGRESS_TREE: 9857d11f92fc3cd0ce3f8ed02db9864547af92d3
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
     steps:
       - name: Checkout audited validation branch
@@ -296,8 +296,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       BASELINE_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
       BASELINE_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
-      CANDIDATE_REF: a1ce748fb9336be8f98363a8388ae5be12155fc3
-      CANDIDATE_TREE: 04c4862ba69548079fd5ba92028b1db792b9e70f
+      CANDIDATE_REF: d07a3a4f3eee3a20a56aae5d7edec5d782bbf0a8
+      CANDIDATE_TREE: 9857d11f92fc3cd0ce3f8ed02db9864547af92d3
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -416,7 +416,7 @@ jobs:
           import groovy.json.JsonSlurper
           import java.security.MessageDigest
 
-          // Observe the authorized native payload build without changing graph, tasks or policies.
+          // Read-only checks do not change producer dependencies, predicates or packaging policies.
           def output = new File(System.getenv('PROBE_OUTPUT'))
           def label = System.getenv('PROBE_LABEL')
           if (!(label in ['baseline', 'candidate'])) throw new GradleException('Unknown probe label')
@@ -430,6 +430,30 @@ jobs:
                   def components = p.extensions.getByName('androidComponents')
                   components.onVariants(components.selector().withBuildType('debug')) { variant ->
                       selectedVariants.add(variant)
+                  }
+                  p.tasks.configureEach { task ->
+                      if (task.name == 'mergeDebugNativeLibs') task.doFirst {
+                          // Resolve in this app-owned task, never another project's task or a global callback.
+                          def file = new File(output, "${label}-config.json")
+                          def info = new JsonSlurper().parse(file)
+                          try {
+                              def graph = p.configurations.getByName('debugRuntimeClasspath').incoming.resolutionResult.allComponents
+                              def old = graph.findAll { component ->
+                                  component.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                                          component.id.group == 'dev.jdtech.mpv' && component.id.module == 'libmpv'
+                              }
+                              def source = graph.findAll { component ->
+                                  component.id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
+                                          component.id.projectPath == ':streamyfin-libmpv-binding'
+                              }
+                              info.appBindingSelection = [released: old.collect { it.id.displayName }, source: source.collect { it.id.displayName }]
+                              if (label == 'candidate' ? (!old.isEmpty() || source.size() != 1) : (old.size() != 1 || !source.isEmpty())) {
+                                  throw new GradleException('Unexpected app-level binding selection')
+                              }
+                          } finally {
+                              writeBounded('config.json', JsonOutput.prettyPrint(JsonOutput.toJson(info)) + '\n', 262144)
+                          }
+                      }
                   }
               }
           }
@@ -543,19 +567,6 @@ jobs:
                       if (!new File(tool.cmakeExecutable).isFile()) throw new GradleException("Provision exact CMake ${tool.cmakeEffective} for ${project.path}; auto-download is disabled")
                   }
                   if (!info.nativeTools.any { it.project == ':app' }) throw new GradleException('Missing native app producer')
-                  def components = app.configurations.getByName('debugRuntimeClasspath').incoming.resolutionResult.allComponents
-                  def old = components.findAll { component ->
-                      component.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
-                              component.id.group == 'dev.jdtech.mpv' && component.id.module == 'libmpv'
-                  }
-                  def source = components.findAll { component ->
-                      component.id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
-                              component.id.projectPath == ':streamyfin-libmpv-binding'
-                  }
-                  info.appBindingSelection = [released: old.collect { it.id.displayName }, source: source.collect { it.id.displayName }]
-                  if (label == 'candidate' ? (!old.isEmpty() || source.size() != 1) : (old.size() != 1 || !source.isEmpty())) {
-                      throw new GradleException('Unexpected app-level binding selection')
-                  }
               } finally {
                   writeBounded('config.json', JsonOutput.prettyPrint(JsonOutput.toJson(info)) + '\n', 262144)
               }
@@ -944,8 +955,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: a1ce748fb9336be8f98363a8388ae5be12155fc3
-      PROGRESS_TREE: 04c4862ba69548079fd5ba92028b1db792b9e70f
+      PROGRESS_REF: d07a3a4f3eee3a20a56aae5d7edec5d782bbf0a8
+      PROGRESS_TREE: 9857d11f92fc3cd0ce3f8ed02db9864547af92d3
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
