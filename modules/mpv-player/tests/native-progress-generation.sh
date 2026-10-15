@@ -7,7 +7,7 @@ trap 'rm -rf "$test_dir"' EXIT
 
 ruby - "$tests_dir/../ios/PlayerEngine.swift" "$test_dir/Progress.swift" <<'RUBY'
 source = File.read(ARGV[0])
-method = source[/^\tfunc renderer\(_: MPVLayerRenderer, didUpdatePosition.*?(?=^\tfunc renderer\(_: MPVLayerRenderer, didChangeLoading)/m]
+method = source[/^\tfunc renderer\(_: MPVLayerRenderer, didUpdatePosition.*?(?=^\tfunc renderer\(_: MPVLayerRenderer, didDetectHDRMode)/m]
 abort 'engine progress callback not found' unless method
 shutdown = source[/^\tfunc shutdown\(\).*?(?=^\tdeinit)/m]
 abort 'engine shutdown not found' unless shutdown

@@ -26,12 +26,12 @@ final class RendererDelegate {
         errors.append(message)
         errorGenerations.append(loadGeneration)
     }
-    func renderer(_ renderer: MPVLayerRenderer, didChangePause paused: Bool, loadGeneration: UInt) {
+    func renderer(_ renderer: MPVLayerRenderer, didChangePause paused: Bool, identity: MPVFileIdentity.Delivery) {
         pauses.append(paused)
-        generations.append(loadGeneration)
+        generations.append(identity.loadGeneration)
     }
     func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double,
-                  duration: Double, cacheSeconds: Double, loadGeneration: UInt) {
+                  duration: Double, cacheSeconds: Double, identity: MPVFileIdentity.Delivery) {
         progress.append(position)
         durations.append(duration)
     }

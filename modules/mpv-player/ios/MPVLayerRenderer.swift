@@ -13,15 +13,15 @@ enum HDRMode {
 }
 
 protocol MPVLayerRendererDelegate: AnyObject {
-    func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, loadGeneration: UInt)
-    func renderer(_ renderer: MPVLayerRenderer, didChangePause isPaused: Bool, loadGeneration: UInt)
+    func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, identity: MPVFileIdentity.Delivery)
+    func renderer(_ renderer: MPVLayerRenderer, didChangePause isPaused: Bool, identity: MPVFileIdentity.Delivery)
     func renderer(_ renderer: MPVLayerRenderer, didFailWithError message: String, loadGeneration: UInt)
-    func renderer(_ renderer: MPVLayerRenderer, didChangeLoading isLoading: Bool)
-    func renderer(_ renderer: MPVLayerRenderer, didBecomeReadyToSeek: Bool)
-    func renderer(_ renderer: MPVLayerRenderer, didBecomeTracksReady: Bool)
+    func renderer(_ renderer: MPVLayerRenderer, didChangeLoading isLoading: Bool, identity: MPVFileIdentity.Delivery)
+    func renderer(_ renderer: MPVLayerRenderer, didBecomeReadyToSeek: Bool, identity: MPVFileIdentity.Delivery)
+    func renderer(_ renderer: MPVLayerRenderer, didBecomeTracksReady: Bool, identity: MPVFileIdentity.Delivery)
     func renderer(_ renderer: MPVLayerRenderer, didDetectHDRMode mode: HDRMode, fps: Double)
     func renderer(_ renderer: MPVLayerRenderer, didSelectAudioOutput audioOutput: String)
-    func rendererPlaybackDidRestart(_ renderer: MPVLayerRenderer, loadGeneration: UInt)
+    func rendererPlaybackDidRestart(_ renderer: MPVLayerRenderer, identity: MPVFileIdentity.Delivery)
     /// Fired only for a genuine end-of-file (MPV_END_FILE_REASON_EOF) — never
     /// for stop/quit during teardown, which would emit spurious end events.
     func rendererDidReachEnd(_ renderer: MPVLayerRenderer, identity: MPVFileIdentity.Receipt)
@@ -656,19 +656,19 @@ final class MPVLayerRenderer {
             self.isReadyToSeek = false
             // Fresh file, fresh recovery budget (see performDecoderReset)
             self.decoderResetCount = 0
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.delegate?.renderer(self, didChangeLoading: true)
+            guard let handle = self.mpv else { return }
+            let source = self.identify(handle)
+            self.fileIdentity.begin(handle: source, generation: loadGeneration)
+            if let identity = self.fileIdentity.pendingDelivery {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, identity.isActive else { return }
+                    self.delegate?.renderer(self, didChangeLoading: true, identity: identity)
+                }
             }
 
             // The audio session is applied off the main thread, and mpv must
             // not open its audio output before that has finished.
             PlayerAudioSession.shared.waitForPendingChanges()
-
-            guard let handle = self.mpv else { return }
-
-            let source = self.identify(handle)
-            self.fileIdentity.begin(handle: source, generation: loadGeneration)
 
             self.apply(commands: preset.commands, on: handle)
             // Stop previous playback before loading new file
@@ -972,13 +972,13 @@ final class MPVLayerRenderer {
             // post-FILE_LOADED fire.
             DispatchQueue.main.async { [weak self] in
                 guard let self, identity.isActive else { return }
-                self.delegate?.renderer(self, didBecomeTracksReady: true)
+                self.delegate?.renderer(self, didBecomeTracksReady: true, identity: identity.delivery)
             }
             if !isReadyToSeek {
                 isReadyToSeek = true
                 DispatchQueue.main.async { [weak self] in
                     guard let self, identity.isActive else { return }
-                    self.delegate?.renderer(self, didBecomeReadyToSeek: true)
+                    self.delegate?.renderer(self, didBecomeReadyToSeek: true, identity: identity.delivery)
                 }
             }
             // Notify loading ended
@@ -986,7 +986,7 @@ final class MPVLayerRenderer {
                 isLoading = false
                 DispatchQueue.main.async { [weak self] in
                     guard let self, identity.isActive else { return }
-                    self.delegate?.renderer(self, didChangeLoading: false)
+                    self.delegate?.renderer(self, didChangeLoading: false, identity: identity.delivery)
                 }
             }
 
@@ -994,14 +994,14 @@ final class MPVLayerRenderer {
             detectHDRMode()
 
         case MPV_EVENT_SEEK:
-            guard fileIdentity.receipt != nil else { return }
+            guard let identity = fileIdentity.receipt else { return }
             // Seek started - show loading indicator and enable immediate progress updates
             isSeeking = true
             if !isLoading {
                 isLoading = true
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didChangeLoading: true)
+                    guard let self, identity.isActive else { return }
+                    self.delegate?.renderer(self, didChangeLoading: true, identity: identity.delivery)
                 }
             }
             
@@ -1009,19 +1009,18 @@ final class MPVLayerRenderer {
             guard let identity = fileIdentity.receipt else { return }
             // Video playback has started/restarted (including after seek)
             isSeeking = false
-            let generation = identity.loadGeneration
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, identity.isActive else { return }
                 self.delegate?.rendererPlaybackDidRestart(
                     self,
-                    loadGeneration: generation
+                    identity: identity.delivery
                 )
             }
             if isLoading {
                 isLoading = false
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didChangeLoading: false)
+                    guard let self, identity.isActive else { return }
+                    self.delegate?.renderer(self, didChangeLoading: false, identity: identity.delivery)
                 }
             }
         case MPV_EVENT_END_FILE:
@@ -1168,15 +1167,16 @@ final class MPVLayerRenderer {
             guard let self, receipt.identity.isActive else { return }
             if let progress = receipt.progress {
                 self.delegate?.renderer(self, didUpdatePosition: progress.position, duration: progress.duration,
-                                        cacheSeconds: progress.cacheSeconds, loadGeneration: progress.identity.loadGeneration)
+                                        cacheSeconds: progress.cacheSeconds, identity: progress.identity.delivery)
             }
+            guard receipt.identity.isActive else { return }
             self.delegate?.renderer(self, didChangePause: receipt.isPaused,
-                                    loadGeneration: receipt.identity.loadGeneration)
+                                    identity: receipt.identity.delivery)
         }
     }
 
     private func refreshProperty(named name: String, event: mpv_event) {
-        guard let handle = mpv, fileIdentity.receipt != nil,
+        guard let handle = mpv, let identity = fileIdentity.receipt,
               let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee else { return }
         switch name {
         case "duration", "time-pos", "demuxer-cache-duration":
@@ -1194,7 +1194,7 @@ final class MPVLayerRenderer {
                 guard let self, receipt.identity.isActive else { return }
                 self.delegate?.renderer(self, didUpdatePosition: receipt.position,
                                         duration: receipt.duration, cacheSeconds: receipt.cacheSeconds,
-                                        loadGeneration: receipt.identity.loadGeneration)
+                                        identity: receipt.identity.delivery)
             }
         case "pause":
             guard property.format == MPV_FORMAT_FLAG, let data = property.data else { return }
@@ -1216,8 +1216,8 @@ final class MPVLayerRenderer {
             if buffering != isLoading {
                 isLoading = buffering
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didChangeLoading: buffering)
+                    guard let self, identity.isActive else { return }
+                    self.delegate?.renderer(self, didChangeLoading: buffering, identity: identity.delivery)
                 }
             }
         case "track-list/count":
@@ -1225,8 +1225,8 @@ final class MPVLayerRenderer {
             let count = data.assumingMemoryBound(to: Int64.self).pointee
             if count > 0 {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didBecomeTracksReady: true)
+                    guard let self, identity.isActive else { return }
+                    self.delegate?.renderer(self, didBecomeTracksReady: true, identity: identity.delivery)
                 }
             }
         case "current-ao":

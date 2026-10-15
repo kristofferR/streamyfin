@@ -685,11 +685,11 @@ final class MPVPlayerEngine: NSObject {
 // MARK: - MPVLayerRendererDelegate
 
 extension MPVPlayerEngine: MPVLayerRendererDelegate {
-	func renderer(_: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, loadGeneration: UInt) {
+	func renderer(_: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, identity: MPVFileIdentity.Delivery) {
 		DispatchQueue.main.async { [weak self] in
-			// The renderer stamped this on its mpv queue. A load or shutdown
-			// since then makes the entire callback belong to an old timeline.
-			guard let self, loadGeneration == self.loadGeneration else { return }
+			// Check the receipt again at the final effect boundary: redirected
+			// children share a request generation but have different permits.
+			guard let self, identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.cachedPosition = position
 			self.cachedDuration = duration
 
@@ -697,17 +697,20 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 				self.pipController?.setCurrentTimeFromSeconds(position)
 			}
 
+			guard identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.delegate?.engine(self, didUpdateProgress: position, duration: duration, cacheSeconds: cacheSeconds)
 		}
 	}
 
-	func renderer(_: MPVLayerRenderer, didChangePause isPaused: Bool, loadGeneration: UInt) {
+	func renderer(_: MPVLayerRenderer, didChangePause isPaused: Bool, identity: MPVFileIdentity.Delivery) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self, loadGeneration == self.loadGeneration else { return }
+			guard let self, identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 
 			print("[MPV] didChangePause: isPaused=\(isPaused), cachedDuration=\(self.cachedDuration)")
 			self.pipController?.setPlaybackRate(isPaused ? 0.0 : 1.0)
+			guard identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.syncNowPlaying(isPlaying: !isPaused)
+			guard identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.delegate?.engine(self, didChangePause: isPaused)
 		}
 	}
@@ -723,23 +726,23 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 		}
 	}
 
-	func renderer(_: MPVLayerRenderer, didChangeLoading isLoading: Bool) {
+	func renderer(_: MPVLayerRenderer, didChangeLoading isLoading: Bool, identity: MPVFileIdentity.Delivery) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.delegate?.engine(self, didChangeLoading: isLoading)
 		}
 	}
 
-	func renderer(_: MPVLayerRenderer, didBecomeReadyToSeek ready: Bool) {
+	func renderer(_: MPVLayerRenderer, didBecomeReadyToSeek ready: Bool, identity: MPVFileIdentity.Delivery) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.delegate?.engine(self, didBecomeReadyToSeek: ready)
 		}
 	}
 
-	func renderer(_: MPVLayerRenderer, didBecomeTracksReady ready: Bool) {
+	func renderer(_: MPVLayerRenderer, didBecomeTracksReady ready: Bool, identity: MPVFileIdentity.Delivery) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 			self.delegate?.engine(self, didBecomeTracksReady: ready)
 		}
 	}
@@ -765,9 +768,9 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 
 	func rendererPlaybackDidRestart(
 		_: MPVLayerRenderer,
-		loadGeneration: UInt
+		identity: MPVFileIdentity.Delivery
 	) {
-		guard loadGeneration == self.loadGeneration else { return }
+		guard identity.loadGeneration == self.loadGeneration, identity.isActive else { return }
 		#if os(iOS)
 		hasRenderedFirstFrame = true
 		reconcilePictureInPictureState()

@@ -20,6 +20,11 @@ struct MPVFileIdentity {
         func terminate(allowCapturedMedia: Bool) { lock.lock(); active = allowCapturedMedia; lock.unlock() }
         func invalidate() { lock.lock(); valid = false; active = false; lock.unlock() }
     }
+    struct Delivery {
+        let loadGeneration: UInt
+        fileprivate let permit: Permit
+        var isActive: Bool { permit.isActive }
+    }
     struct Receipt {
         let handle: Handle
         let entryID: Int64
@@ -27,6 +32,7 @@ struct MPVFileIdentity {
         fileprivate let permit: Permit
         var isValid: Bool { permit.isValid }
         var isActive: Bool { permit.isActive }
+        var delivery: Delivery { Delivery(loadGeneration: loadGeneration, permit: permit) }
     }
     enum Stage { case pending, prepared, terminal }
     enum EndReason { case eof, stopped, error(String) }
@@ -49,6 +55,7 @@ struct MPVFileIdentity {
     private var bindingPending = false
     private var overflowed = false
     private var activeReceipt: Receipt?
+    private var pendingPermit: Permit?
     private var stage = Stage.pending
     private var mayContinueAfterEof = false
     private var early: [Early] = []
@@ -60,6 +67,7 @@ struct MPVFileIdentity {
         requestedHandle = handle
         requestedGeneration = generation
         bindingPending = true
+        pendingPermit = Permit()
     }
 
     @discardableResult
@@ -88,6 +96,9 @@ struct MPVFileIdentity {
         guard requestedHandle === handle else { return nil }
         if bindingPending { retain(.start(entryID)); return nil }
         guard stage != .terminal || mayContinueAfterEof else { return nil }
+        // Initial loading is request-owned only until an actual file starts.
+        pendingPermit?.invalidate()
+        pendingPermit = nil
         guard let entryID, !retired.contains(entryID),
               entryID == rootID || ranges.contains(where: { $0.contains(entryID) }) else {
             activeReceipt?.permit.invalidate()
@@ -159,6 +170,8 @@ struct MPVFileIdentity {
     }
 
     mutating func clear() {
+        pendingPermit?.invalidate()
+        pendingPermit = nil
         activeReceipt?.permit.invalidate()
         activeReceipt = nil
         requestedHandle = nil
@@ -180,6 +193,9 @@ struct MPVFileIdentity {
     }
 
     var receipt: Receipt? { stage == .terminal ? nil : activeReceipt }
+    var pendingDelivery: Delivery? {
+        pendingPermit.map { Delivery(loadGeneration: requestedGeneration, permit: $0) }
+    }
 }
 
 struct MPVProgressReceipt {
