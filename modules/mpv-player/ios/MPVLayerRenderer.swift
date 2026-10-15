@@ -1694,13 +1694,17 @@ final class MPVLayerRenderer {
     }
     
     func setAudioTrack(_ trackId: Int) {
-        guard mpv != nil else {
-            Logger.shared.log("setAudioTrack: mpv handle is nil", type: "Warn")
-            return
+        onQueue { [weak self] in
+            guard let self, let handle = self.mpv else { return }
+            var currentId: Int64 = 0
+            let status = self.getProperty(handle: handle, name: "aid", format: MPV_FORMAT_INT64, value: &currentId)
+            // Selecting the active track must keep any spatial refusal, so a
+            // later seek still decodes it to PCM.
+            if status >= 0, currentId == Int64(trackId) { return }
+            Logger.shared.log("setAudioTrack: setting aid to \(trackId)", type: "Info")
+            if status >= 0 { self.restoreSpatialAudioPassthrough() }
+            self.setProperty(name: "aid", value: String(trackId))
         }
-        Logger.shared.log("setAudioTrack: setting aid to \(trackId)", type: "Info")
-        restoreSpatialAudioPassthrough()
-        setProperty(name: "aid", value: String(trackId))
     }
     
     func getCurrentAudioTrack(completion: @escaping (Int) -> Void) {

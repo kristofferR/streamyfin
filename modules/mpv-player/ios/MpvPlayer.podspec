@@ -14,13 +14,17 @@ Pod::Spec.new do |s|
   # Spatial audio for TrueHD Atmos and DTS:X (SpatialAudioSink.swift).
   spm_dependency(s,
     url: 'https://github.com/kristofferR/SpatialAudioBridge',
-    requirement: { kind: 'upToNextMajorVersion', minimumVersion: '1.5.1' },
+    requirement: { kind: 'exactVersion', version: '1.6.2' },
     products: ['SpatialAudioBridge', 'SpatialAudioPlayback']
   )
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
-    'SWIFT_COMPILATION_MODE' => 'wholemodule'
+    'SWIFT_COMPILATION_MODE' => 'wholemodule',
+    # Builds next to SpatialAudioBridge rather than in a directory of its own,
+    # so its binary core is processed once: twice gives an archive two
+    # signature records of the same name, and it fails.
+    'CONFIGURATION_BUILD_DIR' => '${PODS_CONFIGURATION_BUILD_DIR}'
   }
 
   s.source_files = "**/*.{h,m,mm,swift,hpp,cpp}"
