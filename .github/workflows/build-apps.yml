@@ -32,8 +32,8 @@ jobs:
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: 236a4759e986601dd213c20e3d974b1ebd2c2baa
-      PROGRESS_TREE: a8d0cad55ebc0d51bc777a65cc558770ce9dd3d3
+      PROGRESS_REF: 44ecf0af50d98a636429af65345374b39a63890b
+      PROGRESS_TREE: 845f589b565dbe7111d2b4b9cd3fea34492ce51b
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
     steps:
       - name: Checkout audited validation branch
@@ -158,8 +158,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: 236a4759e986601dd213c20e3d974b1ebd2c2baa
-      PROGRESS_TREE: a8d0cad55ebc0d51bc777a65cc558770ce9dd3d3
+      PROGRESS_REF: 44ecf0af50d98a636429af65345374b39a63890b
+      PROGRESS_TREE: 845f589b565dbe7111d2b4b9cd3fea34492ce51b
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -218,6 +218,16 @@ jobs:
             pod install --deployment
             cmp Podfile.lock "$pod_lock"
           )
+          if [ -f modules/mpv-player/ios/MPVFileIdentity.swift ]; then
+            header_list="$RUNNER_TEMP/mpv-headers-$(git rev-parse HEAD)-$EXPO_TV.txt"
+            rg --files --no-ignore ios/Pods/MPVKit | rg '/Headers/mpv/client.h$' > "$header_list"
+            test -s "$header_list"
+            while IFS= read -r header; do
+              test "$(shasum -a 256 "$header" | cut -d ' ' -f 1)" = 3c073236a09cb456c6e80587d5523c8771c32fb22ca014e0f99cc3d43905b75c
+              rg -q 'MPV_EXPORT int mpv_command_ret' "$header"
+              rg -q 'typedef struct mpv_event_start_file' "$header"
+            done < "$header_list"
+          fi
           if [ "$EXPO_TV" = 0 ]; then
             bun run ios:unsigned-build --no-install --skip-credentials --verbose
           else
