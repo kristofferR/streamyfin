@@ -718,13 +718,14 @@ class MPVLayerRenderer(
                 null
             }
             mainHandler.post {
+                if (!loadPolicy.isCurrent(request)) return@post
                 // bind() protects data only. JNI and delivery are outside it.
                 val binding = loadPolicy.bind(request, result?.file)
-                if (!loadPolicy.isCurrent(request)) return@post
+                if (!loadPolicy.owns(request)) return@post
                 if (!binding.accepted) {
                     _isLoading = false
                     delegate?.onLoadingChanged(false)
-                    if (loadPolicy.isCurrent(request)) delegate?.onError("Could not identify the loaded mpv file")
+                    if (loadPolicy.owns(request)) delegate?.onError("Could not identify the loaded mpv file")
                     return@post
                 }
                 binding.receipts.forEach(::deliverReceipt)
@@ -1215,7 +1216,7 @@ class MPVLayerRenderer(
         if (eventId == MPVLib.MPV_EVENT_SHUTDOWN || eventId == MPVLib.MPV_EVENT_QUEUE_OVERFLOW) {
             val request = loadPolicy.invalidate(handle) ?: return
             mainHandler.post {
-                if (!loadPolicy.isCurrent(request) || mpv !== handle) return@post
+                if (!loadPolicy.owns(request) || mpv !== handle) return@post
                 isReadyToSeek = false
                 _isLoading = false
                 delegate?.onError("mpv event stream lost file identity")

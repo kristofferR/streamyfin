@@ -104,6 +104,7 @@ class MpvLoadPolicyTest {
         val request = policy.begin(handle)
         policy.receive(handle, FileId(handle, 1), loaded, true)
         policy.invalidate(handle)
+        assertFalse(policy.isCurrent(request))
         assertFalse(policy.bind(request, FileId(handle, 1)).accepted)
         assertNull(policy.receive(handle, FileId(handle, 1), loaded, true))
     }

@@ -16,6 +16,7 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
     private var file: F? = null
     private var bindingPending = false
     private var overflowed = false
+    private var invalidated = false
     private val early = mutableListOf<Receipt<H, F, E>>()
 
     @Synchronized fun begin(handle: H): Request<H> {
@@ -26,7 +27,7 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
     /** Called at receipt on the native event thread; values in E must be immutable. */
     @Synchronized fun receive(handle: H, file: F?, event: E, retainEarly: Boolean): Receipt<H, F, E>? {
         val current = request ?: return null
-        if (current.handle !== handle || file == null) return null
+        if (invalidated || current.handle !== handle || file == null) return null
         val receipt = Receipt(current, file, event)
         if (bindingPending) {
             if (retainEarly && !overflowed) {
@@ -43,21 +44,26 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
     }
 
     @Synchronized fun bind(request: Request<H>, file: F?): Binding<H, F, E> {
-        if (this.request !== request || !bindingPending) return Binding(false, emptyList())
+        if (this.request !== request || invalidated || !bindingPending) return Binding(false, emptyList())
         bindingPending = false
         this.file = if (overflowed) null else file
+        invalidated = this.file == null
         val retained = early.filter { it.file == this.file }
         early.clear()
         return Binding(this.file != null, retained)
     }
 
-    @Synchronized fun isCurrent(request: Request<H>): Boolean = this.request === request
+    @Synchronized fun isCurrent(request: Request<H>): Boolean = this.request === request && !invalidated
+
+    /** A failed request may still report its error, until replaced or stopped. */
+    @Synchronized fun owns(request: Request<H>): Boolean = this.request === request
 
     @Synchronized fun isCurrent(receipt: Receipt<H, F, E>): Boolean =
         request === receipt.request && file == receipt.file
 
     @Synchronized fun invalidate(handle: H): Request<H>? {
-        val current = request?.takeIf { it.handle === handle } ?: return null
+        val current = request?.takeIf { it.handle === handle && !invalidated } ?: return null
+        invalidated = true
         file = null
         bindingPending = false
         early.clear()
@@ -69,6 +75,7 @@ internal class MpvLoadPolicy<H : Any, F : Any, E : Any> {
         file = null
         bindingPending = false
         overflowed = false
+        invalidated = false
         early.clear()
     }
 }
