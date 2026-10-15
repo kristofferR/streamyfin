@@ -9,8 +9,9 @@ trap 'rm -rf "$test_dir"' EXIT
 ruby - "$tests_dir/../ios/MPVLayerRenderer.swift" "$test_dir/Selection.swift" <<'RUBY'
 source = File.read(ARGV[0])
 method = source[/^    func setAudioTrack\(_ trackId: Int\) \{.*?(?=^    func getCurrentAudioTrack)/m]
-abort 'setAudioTrack method not found' unless method
-File.write(ARGV[1], "extension AudioTrackSelectionHarness {\n#{method}}\n")
+startup = source[/^    func start\(\) throws \{.*?(?=^        \/\/ Logging\.)/m]
+abort 'audio selection or startup method not found' unless method && startup
+File.write(ARGV[1], "extension AudioTrackSelectionHarness {\n#{method}\n#{startup}\n    }\n}\n")
 RUBY
 swiftc "$test_dir/Selection.swift" "$tests_dir/native-audio-track-selection.swift" -o "$test_dir/test"
 "$test_dir/test"
