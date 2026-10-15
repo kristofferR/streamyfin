@@ -27,6 +27,18 @@ static int64_t command_result(int status, int64_t id) {
 }
 
 int main() {
+    mpv_event_end_file native_end = {};
+    native_end.playlist_entry_id = INT64_C(1) << 40;
+    native_end.reason = MPV_END_FILE_REASON_REDIRECT;
+    native_end.error = MPV_ERROR_LOADING_FAILED;
+    native_end.playlist_insert_id = (INT64_C(1) << 40) + 1;
+    native_end.playlist_insert_num_entries = 3;
+    const auto end = copy_end_file(&native_end);
+    native_end = {};
+    check(end.entry_id == (INT64_C(1) << 40) && end.reason == MPV_END_FILE_REASON_REDIRECT &&
+          end.error == MPV_ERROR_LOADING_FAILED && end.insert_id == (INT64_C(1) << 40) + 1 &&
+          end.insert_count == 3, "END payload is an immutable full-width production snapshot");
+    check(copy_end_file(nullptr).entry_id == -1, "missing END payload cannot invent identity");
     const int64_t large_id = INT64_C(1) << 40;
     check(command_result(0, large_id) == large_id, "command result keeps all 64 bits");
     check(command_result(MPV_ERROR_COMMAND, large_id) == -1, "rejected command has no identity");

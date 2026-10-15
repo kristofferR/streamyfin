@@ -43,6 +43,7 @@ void init_methods_cache(JNIEnv *env) {
         mpv_MPVLib_eventProperty_Sd = env->GetMethodID(mpv_MPVLib, "identifiedEventProperty", "(Ljava/lang/String;DJ)V");
         mpv_MPVLib_eventProperty_SS = env->GetMethodID(mpv_MPVLib, "identifiedEventProperty", "(Ljava/lang/String;Ljava/lang/String;J)V");
         mpv_MPVLib_event = env->GetMethodID(mpv_MPVLib, "identifiedEvent", "(IJ)V");
+        mpv_MPVLib_endFile = env->GetMethodID(mpv_MPVLib, "identifiedEndFile", "(JIIJI)V");
         mpv_MPVLib_logMessage_SiS = env->GetMethodID(mpv_MPVLib, "logMessage", "(Ljava/lang/String;ILjava/lang/String;)V"); // logMessage(String, int, String)
     });
 }

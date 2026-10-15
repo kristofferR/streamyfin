@@ -36,3 +36,19 @@ public:
 private:
     int64_t active_ = -1;
 };
+
+// Copy before the next mpv_wait_event invalidates the C payload.
+struct EndFileSnapshot {
+    int64_t entry_id;
+    int reason;
+    int error;
+    int64_t insert_id;
+    int insert_count;
+};
+
+inline EndFileSnapshot copy_end_file(const mpv_event_end_file *end) {
+    if (!end)
+        return {-1, -1, 0, 0, 0};
+    return {end->playlist_entry_id, static_cast<int>(end->reason), end->error,
+            end->playlist_insert_id, end->playlist_insert_num_entries};
+}

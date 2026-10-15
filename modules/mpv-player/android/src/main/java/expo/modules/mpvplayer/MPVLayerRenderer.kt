@@ -11,6 +11,7 @@ import android.view.Surface
 import android.view.SurfaceView
 import android.view.View
 import dev.jdtech.mpv.FileIdentity
+import dev.jdtech.mpv.EndFile
 import expo.modules.mpvplayer.nativeplayer.MpvOwnership
 import expo.modules.mpvplayer.nativeplayer.engine.PlayerEngine
 import expo.modules.mpvplayer.nativeplayer.engine.VideoLoadConfig
@@ -20,7 +21,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
-private typealias MpvReceipt = MpvLoadPolicy.Receipt<MPVLib, FileIdentity, MpvEventSnapshot>
+private typealias MpvReceipt = MpvLoadPolicy.Receipt<MPVLib>
 
 internal fun normalizeVideoDimensions(width: Int, height: Int, rotation: Int): Pair<Int, Int> {
     val normalizedRotation = ((rotation % 360) + 360) % 360
@@ -108,7 +109,7 @@ class MPVLayerRenderer(
     override var delegate: PlayerEngine.Delegate? = null
     
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val loadPolicy = MpvLoadPolicy<MPVLib, FileIdentity, MpvEventSnapshot>()
+    private val loadPolicy = MpvLoadPolicy<MPVLib>()
 
     // The latest surface size not yet handed to mpv; see updateSurfaceSize.
     private val pendingSurfaceSize = AtomicReference<String?>(null)
@@ -131,6 +132,7 @@ class MPVLayerRenderer(
 
     // Cached state
     private var cachedPosition: Double = 0.0
+    private var loadStartPosition: Double = 0.0
     private var cachedDuration: Double = 0.0
     private var cachedCacheSeconds: Double = 0.0
     private var _isPaused: Boolean = true
@@ -692,6 +694,7 @@ class MPVLayerRenderer(
         loadingRevision++
         isReadyToSeek = false
         val startPosition = loadConfig.startPosition?.takeIf { it > 0 } ?: 0.0
+        loadStartPosition = startPosition
         cachedPosition = startPosition
         cachedDuration = 0.0
         cachedCacheSeconds = 0.0
@@ -722,7 +725,7 @@ class MPVLayerRenderer(
             mainHandler.post {
                 if (!loadPolicy.isCurrent(request)) return@post
                 // bind() protects data only. JNI and delivery are outside it.
-                val binding = loadPolicy.bind(request, result?.file)
+                val binding = loadPolicy.bind(request, result?.file?.let { MpvFileKey(it.source, it.playlistEntryId) })
                 if (!loadPolicy.owns(request)) return@post
                 if (!binding.accepted) {
                     _isLoading = false
@@ -771,7 +774,6 @@ class MPVLayerRenderer(
         mpv?.observeProperty("chapter-list/count", MPV_FORMAT_INT64)
         mpv?.observeProperty("paused-for-cache", MPV_FORMAT_FLAG)
         mpv?.observeProperty("demuxer-cache-duration", MPV_FORMAT_DOUBLE)
-        mpv?.observeProperty("eof-reached", MPV_FORMAT_FLAG)
         // Video dimensions for PiP aspect ratio
         mpv?.observeProperty("video-params/w", MPV_FORMAT_INT64)
         mpv?.observeProperty("video-params/h", MPV_FORMAT_INT64)
@@ -1201,7 +1203,8 @@ class MPVLayerRenderer(
     // Native receipts contain immutable values. All cache and delegate work is
     // serialized on main and guarded again immediately before delivery.
     private fun receive(handle: MPVLib, file: FileIdentity?, event: MpvEventSnapshot) {
-        val receipt = loadPolicy.receive(handle, file, event, retainEarly = event !is MpvEventSnapshot.Decimal)
+        val key = file?.let { MpvFileKey(it.source, it.playlistEntryId) }
+        val receipt = loadPolicy.receive(handle, key, event, retainEarly = event !is MpvEventSnapshot.Decimal)
         if (receipt != null) mainHandler.post { deliverReceipt(receipt) }
     }
 
@@ -1228,6 +1231,9 @@ class MPVLayerRenderer(
         receive(handle, file, MpvEventSnapshot.Event(eventId, seekReportGeneration, seekReportRequestId))
     }
 
+    override fun endFile(handle: MPVLib, file: FileIdentity?, end: EndFile) =
+        receive(handle, file, MpvEventSnapshot.EndFile(end.reason, end.error, end.playlistInsertId, end.playlistInsertCount))
+
     private fun isCurrent(receipt: MpvReceipt): Boolean =
         isRunning && mpv === receipt.request.handle && loadPolicy.isCurrent(receipt)
 
@@ -1242,7 +1248,23 @@ class MPVLayerRenderer(
             is MpvEventSnapshot.Flag -> handleFlag(receipt, event.property, event.value)
             is MpvEventSnapshot.Decimal -> handleDecimal(receipt, event.property, event.value)
             is MpvEventSnapshot.Event -> handleEvent(receipt, event)
+            is MpvEventSnapshot.EndFile, is MpvEventSnapshot.Failure -> {
+                if (!loadPolicy.takeTerminal(receipt)) return
+                finishTerminalLoad(receipt)
+                event.reportTerminal(
+                    onEof = { notifyPlaybackEnd(receipt) },
+                    onError = { message -> notify(receipt) { it.onError(message) } },
+                )
+            }
         }
+    }
+
+    private fun finishTerminalLoad(receipt: MpvReceipt) {
+        isReadyToSeek = false
+        _isSeeking = false
+        activeSeekReportRequestId = null
+        _isLoading = false
+        notify(receipt) { it.onLoadingChanged(false) }
     }
 
     private fun handleInteger(receipt: MpvReceipt, property: String, value: Long) {
@@ -1299,11 +1321,6 @@ class MPVLayerRenderer(
                     notify(receipt) { it.onLoadingChanged(value) }
                 }
             }
-            "eof-reached" -> if (value) {
-                notifyPlaybackEnd(receipt)
-            } else {
-                didNotifyPlaybackEnd = false
-            }
         }
     }
 
@@ -1335,6 +1352,15 @@ class MPVLayerRenderer(
     private fun handleEvent(receipt: MpvReceipt, event: MpvEventSnapshot.Event) {
         val handle = receipt.request.handle
         when (event.id) {
+            MPVLib.MPV_EVENT_START_FILE -> {
+                cachedPosition = loadStartPosition
+                cachedDuration = 0.0
+                cachedCacheSeconds = 0.0
+                lastProgressUpdateTime = 0
+                isReadyToSeek = false
+                _isLoading = true
+                loadingRevision++
+            }
             MPVLib.MPV_EVENT_FILE_LOADED -> {
                 val subtitles = pendingExternalSubtitles
                 val audioId = initialAudioId
@@ -1415,9 +1441,6 @@ class MPVLayerRenderer(
                     }
                 }
                 if (wasLoading) notify(receipt) { it.onLoadingChanged(false) }
-            }
-            MPVLib.MPV_EVENT_END_FILE -> {
-                if (handle.getPropertyBoolean("eof-reached") == true) notifyPlaybackEnd(receipt)
             }
         }
     }

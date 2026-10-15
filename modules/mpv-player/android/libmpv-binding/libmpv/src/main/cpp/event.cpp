@@ -104,10 +104,12 @@ void *event_thread(void *arg) {
             break;
         }
         case MPV_EVENT_END_FILE: {
-            const auto *end = static_cast<mpv_event_end_file*>(mp_event->data);
-            const int64_t entry_id = end ? end->playlist_entry_id : -1;
-            sendEventToJava(env, instance, mp_event->event_id, entry_id);
-            file.end(entry_id);
+            const auto end = copy_end_file(static_cast<mpv_event_end_file*>(mp_event->data));
+            env->CallVoidMethod(instance->javaObject, mpv_MPVLib_endFile,
+                static_cast<jlong>(end.entry_id), static_cast<jint>(end.reason),
+                static_cast<jint>(end.error), static_cast<jlong>(end.insert_id),
+                static_cast<jint>(end.insert_count));
+            file.end(end.entry_id);
             break;
         }
         case MPV_EVENT_QUEUE_OVERFLOW:

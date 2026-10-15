@@ -11,9 +11,11 @@ method = source[/^\tfunc renderer\(_: MPVLayerRenderer, didUpdatePosition.*?(?=^
 abort 'engine progress callback not found' unless method
 shutdown = source[/^\tfunc shutdown\(\).*?(?=^\tdeinit)/m]
 abort 'engine shutdown not found' unless shutdown
-File.write(ARGV[1], "import Foundation\nextension MPVPlayerEngine {\n#{method}\n#{shutdown}}\n")
+eof = source[/^\tfunc rendererDidReachEnd.*?(?=^\}\n)/m]
+abort 'engine EOF callback not found' unless eof
+File.write(ARGV[1], "import Foundation\nextension MPVPlayerEngine {\n#{method}\n#{shutdown}\n#{eof}}\n")
 RUBY
-swiftc "$test_dir/Progress.swift" "$tests_dir/native-progress-generation.swift" -o "$test_dir/test"
+swiftc "$tests_dir/../ios/MPVFileIdentity.swift" "$test_dir/Progress.swift" "$tests_dir/native-progress-generation.swift" -o "$test_dir/test"
 "$test_dir/test"
 
 # Exercise actual renderer identity assignment, C result/payload decoding and
@@ -29,7 +31,7 @@ MODULE
 
 ruby - "$tests_dir/../ios/MPVLayerRenderer.swift" "$test_dir/RendererReceipts.swift" <<'RUBY'
 source = File.read(ARGV[0])
-methods = ['private static func playlistEntryID', 'private static func eventDouble', 'private func captureProgress', 'private func capturePause', 'private func reportPause', 'private func handleQueueOverflow'].map do |name|
+methods = ['private static func playlistEntryID', 'private static func eventDouble', 'private func captureProgress', 'private func capturePause', 'private func reportPause', 'private func handleQueueOverflow', 'private static func endFileSnapshot', 'private func deliverEndOutcome', 'private func handleFileStart'].map do |name|
   start = source.index(name) or abort "missing production method: #{name}"
   finish = source.index('{', start) or abort 'missing method body'
   depth = 1

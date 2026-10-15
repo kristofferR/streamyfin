@@ -26,13 +26,19 @@ final class ProgressDelegate {
     var errors: [String] = []
     var readiness: [Bool] = []
     var loading: [Bool] = []
+    var ends = 0
+    var onReadiness: ((MPVPlayerEngine) -> Void)?
+    func engineDidReachEnd(_ engine: MPVPlayerEngine) { ends += 1 }
     var positions: [Double] = []
     var pauses: [Bool] = []
     func engine(_ engine: MPVPlayerEngine, didUpdateProgress position: Double,
                 duration: Double, cacheSeconds: Double) { positions.append(position) }
     func engine(_ engine: MPVPlayerEngine, didChangePause paused: Bool) { pauses.append(paused) }
     func engine(_ engine: MPVPlayerEngine, didFailWithError message: String) { errors.append(message) }
-    func engine(_ engine: MPVPlayerEngine, didBecomeReadyToSeek ready: Bool) { readiness.append(ready) }
+    func engine(_ engine: MPVPlayerEngine, didBecomeReadyToSeek ready: Bool) {
+        readiness.append(ready)
+        onReadiness?(engine)
+    }
     func engine(_ engine: MPVPlayerEngine, didChangeLoading value: Bool) { loading.append(value) }
 }
 final class MPVPlayerEngine {
@@ -118,6 +124,41 @@ struct ProgressGenerationTests {
                      "actual shutdown suppresses queued error, progress and pause delivery")
         engine.shutdown()
         precondition(engine.loadGeneration == 8, "shutdown remains idempotent")
+        let eofEngine = MPVPlayerEngine()
+        var files = MPVFileIdentity()
+        let source = MPVFileIdentity.Handle()
+        files.begin(handle: source, generation: 1)
+        files.bind(handle: source, generation: 1, entryID: 1)
+        files.start(handle: source, entryID: 1)
+        let oldFile = files.receipt!
+        _ = files.end(handle: source, payload: MPVEndFile(entryID: 1, reason: 0, error: 0, insertID: 0, insertCount: 0))
+        eofEngine.rendererDidReachEnd(renderer, identity: oldFile)
+        files.start(handle: source, entryID: 1) // Same request, new physical playback.
+        DispatchQueue.main.drain()
+        precondition(eofEngine.delegate!.ends == 0, "final EOF rejects a retired physical file even within one generation")
+        let replaced = files.receipt!
+        eofEngine.rendererDidReachEnd(renderer, identity: replaced)
+        eofEngine.loadGeneration = 2
+        DispatchQueue.main.drain()
+        precondition(eofEngine.delegate!.ends == 0, "final EOF also rejects a replaced load generation")
+        files.begin(handle: source, generation: 2)
+        files.bind(handle: source, generation: 2, entryID: 2)
+        files.start(handle: source, entryID: 2)
+        let accepted = files.receipt!
+        _ = files.end(handle: source, payload: MPVEndFile(entryID: 2, reason: 0, error: 0, insertID: 0, insertCount: 0))
+        eofEngine.rendererDidReachEnd(renderer, identity: accepted)
+        DispatchQueue.main.drain()
+        precondition(eofEngine.delegate!.ends == 1, "a valid current EOF reaches the player")
+        eofEngine.rendererDidReachEnd(renderer, identity: accepted)
+        eofEngine.shutdown()
+        DispatchQueue.main.drain()
+        precondition(eofEngine.delegate!.ends == 1, "actual shutdown suppresses queued EOF")
+        let reentered = MPVPlayerEngine()
+        reentered.delegate!.onReadiness = { $0.loadGeneration += 1 }
+        reentered.renderer(renderer, didFailWithError: "replaced during callback", loadGeneration: 1)
+        DispatchQueue.main.drain()
+        precondition(reentered.delegate!.errors.isEmpty && reentered.delegate!.loading.isEmpty,
+                     "readiness reentry cannot apply an old failure to a replacement load")
         print("Native progress, pause and terminal-error final-delivery generations passed")
     }
 }

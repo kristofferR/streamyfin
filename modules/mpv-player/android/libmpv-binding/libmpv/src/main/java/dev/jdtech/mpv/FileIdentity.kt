@@ -13,3 +13,11 @@ data class LoadResult internal constructor(
     val status: Int,
     val file: FileIdentity?,
 )
+
+/** Immutable END_FILE payload; entry identity is supplied by the observer. */
+data class EndFile internal constructor(
+    val reason: Int,
+    val error: Int,
+    val playlistInsertId: Long,
+    val playlistInsertCount: Int,
+)

@@ -1,10 +1,16 @@
 # Streamyfin source binding proposal
 
-This is a preparation checkout based on libmpv-android 1.0.0 at
-`fcf6745703dc1265bca88f12fee8fc355ddf251e`. Nothing here is installed in
-Streamyfin, released, pushed, or compiled yet. The source build and validation
-files are review drafts. Streamyfin's existing dependency and open Android
-progress finding remain unchanged.
+This is the fork-owned source binding based on libmpv-android 1.0.0 at
+`fcf6745703dc1265bca88f12fee8fc355ddf251e`, initially prepared as
+`f6a4adba403fdd4e431349f882481f2bb41ccc84` and vendored in Streamyfin's
+review candidate. No replacement AAR is released. Compiler, JNI/runtime and
+consumer validation remain unrun for the current changes.
+
+The local END payload addition and checked redirect lineage are documented in
+[END_FILE-evidence.md](END_FILE-evidence.md). Legacy callbacks are preserved;
+media cores, runtime-byte verification and pinned headers are unchanged.
+The following sections retain the source-consumption design and its validation
+requirements; implementation is not proof that those requirements have passed.
 
 ## Consumption without a new binary release
 

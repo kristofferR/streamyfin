@@ -11,13 +11,23 @@
     "sha256": "df146592480fc8418415a06b1f1a1d6318b0088e21f52254b0e9a82b61ca8fa2",
     "mpvVersionStringInspected": "mpv v0.41.0",
     "exportInspected": "mpv_command_ret",
-    "abisInspected": ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"],
+    "abisInspected": [
+      "arm64-v8a",
+      "armeabi-v7a",
+      "x86",
+      "x86_64"
+    ],
     "runtimeExecutionPerformed": false
   },
   "orderingAudit": {
     "mpvCommit": "41f6a645068483470267271e1d09966ca3b9f413",
     "mpvTag": "v0.41.0",
-    "files": ["player/command.c", "player/client.c", "player/loadfile.c"],
+    "files": [
+      "player/command.c",
+      "player/client.c",
+      "player/loadfile.c",
+      "common/playlist.c"
+    ],
     "basis": "Binding build scripts select mpv 0.41.0; released core version string agrees. This is source evidence, not native execution proof."
   },
   "headers": [
@@ -35,5 +45,22 @@
       "sha256": "f98405ffb7ba26665cde92daef33bc4371c91aa6c85b522b36864ed289600ebc",
       "license": "LGPL-2.1-or-later"
     }
-  ]
+  ],
+  "forkChanges": {
+    "basePreparationCommit": "f6a4adba403fdd4e431349f882481f2bb41ccc84",
+    "endCallback": {
+      "name": "identifiedEndFile",
+      "descriptor": "(JIIJI)V",
+      "fields": [
+        "entryId:i64",
+        "reason:i32",
+        "error:i32",
+        "insertId:i64",
+        "insertCount:i32"
+      ]
+    },
+    "evidence": "consumer/END_FILE-evidence.md",
+    "runtimeExecutionPerformed": false,
+    "mediaCoreOrHeaderChanges": false
+  }
 }

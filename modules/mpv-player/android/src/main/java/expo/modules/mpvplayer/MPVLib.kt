@@ -2,6 +2,7 @@ package expo.modules.mpvplayer
 
 import android.content.Context
 import dev.jdtech.mpv.FileIdentity
+import dev.jdtech.mpv.EndFile
 import dev.jdtech.mpv.LoadResult
 import dev.jdtech.mpv.MPVLib as LibMPV
 
@@ -31,6 +32,7 @@ class MPVLib private constructor(private val instance: LibMPV) {
         fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Boolean)
         fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Double)
         fun event(handle: MPVLib, file: FileIdentity?, eventId: Int)
+        fun endFile(handle: MPVLib, file: FileIdentity?, end: EndFile)
     }
 
     private val observers = MpvObservers<EventObserver>()
@@ -48,6 +50,9 @@ class MPVLib private constructor(private val instance: LibMPV) {
 
         override fun event(eventId: Int, file: FileIdentity?) =
             observers.dispatch { it.event(this@MPVLib, file, eventId) }
+
+        override fun endFile(file: FileIdentity?, end: EndFile) =
+            observers.dispatch { it.endFile(this@MPVLib, file, end) }
     }
 
     fun addObserver(observer: EventObserver) = observers.add(observer)

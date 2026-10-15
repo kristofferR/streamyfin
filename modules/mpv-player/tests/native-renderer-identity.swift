@@ -16,6 +16,8 @@ final class DeliveryQueue {
 final class RendererDelegate {
     var errors: [String] = []
     var errorGenerations: [UInt] = []
+    var ends = 0
+    func rendererDidReachEnd(_ renderer: MPVLayerRenderer, identity: MPVFileIdentity.Receipt) { ends += 1 }
     var pauses: [Bool] = []
     var generations: [UInt] = []
     var progress: [Double] = []
@@ -37,6 +39,8 @@ final class RendererDelegate {
 final class MPVLayerRenderer {
     var fileIdentity = MPVFileIdentity()
     var cachedPosition = 120.0
+    var loadStartPosition = 120.0
+    var lastProgressUpdateTime = 0.0
     var cachedDuration = 0.0
     var cachedCacheSeconds = 0.0
     var isPaused = true
@@ -48,6 +52,9 @@ final class MPVLayerRenderer {
 
 @main
 struct RendererIdentityTests {
+    static func end(_ entry: Int64, _ reason: Int, _ first: Int64 = 0, _ count: Int = 0) -> MPVEndFile {
+        MPVEndFile(entryID: entry, reason: reason, error: -13, insertID: first, insertCount: count)
+    }
     static func commandResult(_ status: Int32, _ id: Int64,
                               key: String = "playlist_entry_id",
                               format: mpv_format = MPV_FORMAT_INT64) -> Int64? {
@@ -219,6 +226,142 @@ struct RendererIdentityTests {
         overflowRenderer.handleQueueOverflow(source: handle)
         DispatchQueue.main.drain()
         precondition(overflowRenderer.delegate!.errorGenerations == [11, 12])
-        print("Renderer native identity, C decoding, progress/pause receipts and terminal overflow passed")
+        var nativeEnd = mpv_event_end_file()
+        nativeEnd.playlist_entry_id = largeID
+        nativeEnd.reason = MPV_END_FILE_REASON_REDIRECT
+        nativeEnd.error = -13
+        nativeEnd.playlist_insert_id = largeID + 1
+        nativeEnd.playlist_insert_num_entries = 3
+        withUnsafeMutablePointer(to: &nativeEnd) { pointer in
+            var event = mpv_event()
+            event.data = UnsafeMutableRawPointer(pointer)
+            let snapshot = MPVLayerRenderer.endFileSnapshot(event)!
+            pointer.pointee.playlist_insert_id = 0
+            precondition(snapshot.entryID == largeID && snapshot.reason == 5 && snapshot.error == -13
+                         && snapshot.insertID == largeID + 1 && snapshot.insertCount == 3,
+                         "the actual C END decoder freezes all fields before mpv reuses storage")
+        }
+        precondition(MPVLayerRenderer.endFileSnapshot(mpv_event()) == nil)
+
+        let startRenderer = MPVLayerRenderer()
+        startRenderer.cachedPosition = 999
+        startRenderer.cachedDuration = 3600
+        startRenderer.fileIdentity.begin(handle: handle, generation: 29)
+        startRenderer.fileIdentity.bind(handle: handle, generation: 29, entryID: 1)
+        startRenderer.handleFileStart(source: newHandle, entryID: 1)
+        precondition(startRenderer.cachedPosition == 999, "unowned START cannot reset a new file cache")
+        startRenderer.handleFileStart(source: handle, entryID: 1)
+        precondition(startRenderer.cachedPosition == 120 && startRenderer.cachedDuration == 0)
+        startRenderer.deliverEndOutcome(startRenderer.fileIdentity.end(handle: handle, payload: end(1, 5, 10, 2)))
+        startRenderer.cachedPosition = 500
+        startRenderer.handleFileStart(source: handle, entryID: 11)
+        precondition(startRenderer.cachedPosition == 120 && startRenderer.fileIdentity.receipt?.entryID == 11,
+                     "actual child START clears the previous physical clock without inventing a progress callback")
+
+        let endRenderer = MPVLayerRenderer()
+        for early in [false, true] {
+            let generation: UInt = early ? 31 : 30
+            endRenderer.fileIdentity.begin(handle: handle, generation: generation)
+            if !early { endRenderer.fileIdentity.bind(handle: handle, generation: generation, entryID: 1) }
+            endRenderer.fileIdentity.start(handle: handle, entryID: 1)
+            endRenderer.deliverEndOutcome(endRenderer.fileIdentity.end(handle: handle, payload: end(1, 4)))
+            if early {
+                let outcomes = endRenderer.fileIdentity.bind(handle: handle, generation: generation, entryID: 1)
+                outcomes.forEach(endRenderer.deliverEndOutcome)
+            }
+            endRenderer.deliverEndOutcome(endRenderer.fileIdentity.end(handle: handle, payload: end(1, 4)))
+            endRenderer.fileIdentity.start(handle: handle, entryID: 1)
+            precondition(endRenderer.fileIdentity.receipt == nil,
+                         "accepted ERROR is terminal and cannot later become ready")
+            DispatchQueue.main.drain()
+        }
+        precondition(endRenderer.delegate!.errorGenerations == [30, 31] && endRenderer.delegate!.ends == 0)
+
+        var lineage = MPVFileIdentity()
+        lineage.begin(handle: handle, generation: 40)
+        lineage.start(handle: handle, entryID: 1)
+        _ = lineage.end(handle: handle, payload: end(1, 5, 10, 3))
+        lineage.start(handle: handle, entryID: 12)
+        _ = lineage.end(handle: handle, payload: end(12, 5, 20, 2))
+        lineage.start(handle: handle, entryID: 21)
+        _ = lineage.bind(handle: handle, generation: 40, entryID: 1)
+        let ready = lineage.receipt!
+        precondition(ready.entryID == 21 && lineage.markPrepared(ready),
+                     "early nested redirects follow the actual non-first child START")
+        _ = lineage.end(handle: handle, payload: end(999, 4))
+        precondition(lineage.receipt?.entryID == 21, "unrelated END cannot terminate the accepted child")
+        lineage.start(handle: handle, entryID: 999)
+        precondition(lineage.receipt == nil && !ready.isValid)
+        lineage.start(handle: handle, entryID: 20)
+        precondition(lineage.receipt?.entryID == 20)
+        let firstChild = lineage.receipt!
+        _ = lineage.end(handle: handle, payload: end(20, 0))
+        lineage.start(handle: handle, entryID: 10)
+        precondition(lineage.receipt?.entryID == 10 && !firstChild.isValid,
+                     "normal EOF can continue to another proven child, retiring old delivery")
+
+        for reason in [2, 3, 4] {
+            lineage.begin(handle: handle, generation: 41)
+            lineage.bind(handle: handle, generation: 41, entryID: 1)
+            lineage.start(handle: handle, entryID: 1)
+            let outcome = lineage.end(handle: handle, payload: end(1, reason))
+            let renderer = MPVLayerRenderer()
+            renderer.deliverEndOutcome(outcome)
+            DispatchQueue.main.drain()
+            precondition(renderer.delegate!.ends == 0 && renderer.delegate!.errors.count == (reason == 4 ? 1 : 0))
+            lineage.start(handle: handle, entryID: 1)
+            precondition(lineage.receipt == nil, "STOP, QUIT and ERROR cannot acknowledge later success")
+        }
+
+        for (first, count) in [(Int64(0), 1), (10, 0), (10, -1), (Int64.max, 2)] {
+            lineage.begin(handle: handle, generation: 42)
+            lineage.bind(handle: handle, generation: 42, entryID: 1)
+            lineage.start(handle: handle, entryID: 1)
+            guard case .terminal(_, .error) = lineage.end(handle: handle, payload: end(1, 5, first, count))
+            else { preconditionFailure("malformed inserted range must fail explicitly") }
+        }
+        lineage.begin(handle: handle, generation: 43)
+        lineage.bind(handle: handle, generation: 43, entryID: 1)
+        lineage.start(handle: handle, entryID: 1)
+        for entry in Int64(1)...64 {
+            _ = lineage.end(handle: handle, payload: end(entry, 5, entry + 1, 1))
+            lineage.start(handle: handle, entryID: entry + 1)
+        }
+        guard case .terminal(_, .error) = lineage.end(handle: handle, payload: end(65, 5, 66, 1))
+        else { preconditionFailure("lineage exhaustion must fail explicitly") }
+        lineage.begin(handle: handle, generation: 44)
+        for _ in 0..<65 { lineage.start(handle: handle, entryID: 1) }
+        let exhausted = lineage.bind(handle: handle, generation: 44, entryID: 1)
+        guard let firstFailure = exhausted.first, case .requestFailure = firstFailure
+        else { preconditionFailure("early-event exhaustion must fail explicitly") }
+        lineage.begin(handle: newHandle, generation: 45)
+        lineage.bind(handle: newHandle, generation: 45, entryID: 10)
+        lineage.start(handle: handle, entryID: 10)
+        precondition(lineage.receipt == nil, "old handle cannot reuse a redirected numeric ID")
+        lineage.start(handle: newHandle, entryID: 10)
+        let stopped = lineage.receipt!
+        _ = lineage.end(handle: handle, payload: end(10, 4))
+        precondition(lineage.receipt?.isActive == true, "old handle END cannot terminate a reused ID")
+        lineage.clear()
+        precondition(!stopped.isValid)
+
+        let eofRenderer = MPVLayerRenderer()
+        eofRenderer.fileIdentity.begin(handle: handle, generation: 50)
+        eofRenderer.fileIdentity.bind(handle: handle, generation: 50, entryID: 1)
+        eofRenderer.fileIdentity.start(handle: handle, entryID: 1)
+        eofRenderer.deliverEndOutcome(eofRenderer.fileIdentity.end(handle: handle, payload: end(1, 5, 10, 2)))
+        eofRenderer.fileIdentity.start(handle: handle, entryID: 10)
+        eofRenderer.deliverEndOutcome(eofRenderer.fileIdentity.end(handle: handle, payload: end(10, 0)))
+        eofRenderer.fileIdentity.start(handle: handle, entryID: 11)
+        DispatchQueue.main.drain()
+        precondition(eofRenderer.delegate!.ends == 0, "actual handler suppresses EOF retired before main delivery")
+        let pendingReady = eofRenderer.fileIdentity.receipt!
+        eofRenderer.reportPause(false)
+        eofRenderer.deliverEndOutcome(eofRenderer.fileIdentity.end(handle: handle, payload: end(11, 4)))
+        precondition(!pendingReady.isActive && !eofRenderer.fileIdentity.markPrepared(pendingReady),
+                     "terminal failure suppresses pending readiness and success")
+        DispatchQueue.main.drain()
+        precondition(eofRenderer.delegate!.errors.count == 1 && eofRenderer.delegate!.pauses.isEmpty)
+        print("Renderer production END decoding/handling, lineage, progress/pause and overflow passed")
     }
 }

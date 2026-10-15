@@ -205,6 +205,12 @@ class MPVLib private constructor(nativePtr: Long) {
         identified(entryId) { observer, file -> observer.event(eventId, file) }
     }
 
+    fun identifiedEndFile(entryId: Long, reason: Int, error: Int, insertId: Long, insertCount: Int) {
+        event(MpvEvent.MPV_EVENT_END_FILE)
+        val end = EndFile(reason, error, insertId, insertCount)
+        identified(entryId) { observer, file -> observer.endFile(file, end) }
+    }
+
     fun eventProperty(property: String, value: Long) {
         synchronized(observers) {
             for (o in observers)
@@ -281,6 +287,7 @@ class MPVLib private constructor(nativePtr: Long) {
 
     /** Null means no active file is known; never infer one from request order. */
     interface IdentifiedEventObserver {
+        fun endFile(file: FileIdentity?, end: EndFile) { event(MpvEvent.MPV_EVENT_END_FILE, file) }
         fun eventProperty(property: String, file: FileIdentity?) {}
         fun eventProperty(property: String, value: Long, file: FileIdentity?) {}
         fun eventProperty(property: String, value: Double, file: FileIdentity?) {}

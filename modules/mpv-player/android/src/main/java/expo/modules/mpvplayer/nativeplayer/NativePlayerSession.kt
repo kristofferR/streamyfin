@@ -682,10 +682,10 @@ class NativePlayerSession(
 
         // A sidecar re-added by JS onLoad must follow native FILE_LOADED track
         // preparation. Keep autoplay/setup immediate so readiness can be reached.
-        val acknowledgement = LoadAcknowledgement {
+        val acknowledgement = LoadAcknowledgement({ viewModel.isPlaying }) { isPlaying ->
             emit(
                 "onLoad",
-                mapOf("url" to loadConfig.url, "muted" to viewModel.isMuted, "isPlaying" to loadConfig.autoplay),
+                mapOf("url" to loadConfig.url, "muted" to viewModel.isMuted, "isPlaying" to isPlaying),
             )
         }
         engine?.load(loadConfig, acknowledgement::filePrepared)

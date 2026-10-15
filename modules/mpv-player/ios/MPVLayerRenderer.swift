@@ -24,7 +24,7 @@ protocol MPVLayerRendererDelegate: AnyObject {
     func rendererPlaybackDidRestart(_ renderer: MPVLayerRenderer, loadGeneration: UInt)
     /// Fired only for a genuine end-of-file (MPV_END_FILE_REASON_EOF) — never
     /// for stop/quit during teardown, which would emit spurious end events.
-    func rendererDidReachEnd(_ renderer: MPVLayerRenderer)
+    func rendererDidReachEnd(_ renderer: MPVLayerRenderer, identity: MPVFileIdentity.Receipt)
 }
 
 /// MPV player using vo_avfoundation for video output.
@@ -126,6 +126,7 @@ final class MPVLayerRenderer {
     private var _isReadyToSeek: Bool = false
     private var _isSeeking: Bool = false
     private var fileIdentity = MPVFileIdentity()
+    private var loadStartPosition = 0.0
     private var identityHandle: OpaquePointer?
     private var identitySource = MPVFileIdentity.Handle()
 
@@ -702,7 +703,8 @@ final class MPVLayerRenderer {
             // and left at 0 (or at the previous file's position) it told the
             // delegate a resumed file was at 0:00, which was then reported to
             // the server and cleared the item's resume point.
-            self.cachedPosition = max(0, startPosition ?? 0)
+            self.loadStartPosition = max(0, startPosition ?? 0)
+            self.cachedPosition = self.loadStartPosition
             self.cachedDuration = 0
             self.cachedCacheSeconds = 0
             self.lastProgressUpdateTime = 0
@@ -730,7 +732,8 @@ final class MPVLayerRenderer {
             }
             let entryID = Self.playlistEntryID(from: result, status: status)
             if status >= 0 { mpv_free_node_contents(&result) }
-            self.fileIdentity.bind(handle: source, generation: loadGeneration, entryID: entryID)
+            let outcomes = self.fileIdentity.bind(handle: source, generation: loadGeneration, entryID: entryID)
+            outcomes.forEach(self.deliverEndOutcome)
             self.checkError(status)
         }
     }
@@ -925,10 +928,10 @@ final class MPVLayerRenderer {
         switch event.event_id {
         case MPV_EVENT_START_FILE:
             let entryID = event.data?.assumingMemoryBound(to: mpv_event_start_file.self).pointee.playlist_entry_id
-            fileIdentity.start(handle: source, entryID: entryID)
+            handleFileStart(source: source, entryID: entryID)
 
         case MPV_EVENT_FILE_LOADED:
-            guard fileIdentity.receipt != nil else { return }
+            guard let identity = fileIdentity.receipt, fileIdentity.markPrepared(identity) else { return }
             // Initial pause notifications can precede the first accepted file.
             // Report a changed state once this file is known to be loaded,
             // without inventing a position for this reconciliation.
@@ -968,13 +971,13 @@ final class MPVLayerRenderer {
             // after it — for embedded-only files this is the only
             // post-FILE_LOADED fire.
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, identity.isActive else { return }
                 self.delegate?.renderer(self, didBecomeTracksReady: true)
             }
             if !isReadyToSeek {
                 isReadyToSeek = true
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, identity.isActive else { return }
                     self.delegate?.renderer(self, didBecomeReadyToSeek: true)
                 }
             }
@@ -982,7 +985,7 @@ final class MPVLayerRenderer {
             if isLoading {
                 isLoading = false
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, identity.isActive else { return }
                     self.delegate?.renderer(self, didChangeLoading: false)
                 }
             }
@@ -1022,20 +1025,8 @@ final class MPVLayerRenderer {
                 }
             }
         case MPV_EVENT_END_FILE:
-            let identity = fileIdentity.receipt
-            let endFile = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee
-            fileIdentity.end(handle: source, entryID: endFile?.playlist_entry_id)
-            // Only a real EOF counts as "playback ended". The other reasons
-            // (stop, quit, error, redirect) fire during teardown and stream
-            // replacement, where an end event would incorrectly trigger the
-            // native player's auto-advance/auto-close.
-            if let identity, let endFile,
-               endFile.playlist_entry_id == identity.entryID,
-               endFile.reason == MPV_END_FILE_REASON_EOF {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.rendererDidReachEnd(self)
-                }
+            if let end = Self.endFileSnapshot(event) {
+                deliverEndOutcome(fileIdentity.end(handle: source, payload: end))
             }
 
         case MPV_EVENT_PROPERTY_CHANGE:
@@ -1092,6 +1083,53 @@ final class MPVLayerRenderer {
         }
     }
 
+    private func handleFileStart(source: MPVFileIdentity.Handle, entryID: Int64?) {
+        guard fileIdentity.start(handle: source, entryID: entryID) != nil else { return }
+        // A redirected child must not inherit the previous child's clock/cache.
+        cachedPosition = loadStartPosition
+        cachedDuration = 0
+        cachedCacheSeconds = 0
+        lastProgressUpdateTime = 0
+        isReadyToSeek = false
+    }
+
+    private static func endFileSnapshot(_ event: mpv_event) -> MPVEndFile? {
+        guard let payload = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee else { return nil }
+        return MPVEndFile(entryID: payload.playlist_entry_id, reason: Int(payload.reason.rawValue),
+                          error: Int(payload.error), insertID: payload.playlist_insert_id,
+                          insertCount: Int(payload.playlist_insert_num_entries))
+    }
+
+    private func deliverEndOutcome(_ outcome: MPVFileIdentity.EndOutcome) {
+        switch outcome {
+        case .ignored: return
+        case .redirected:
+            isReadyToSeek = false
+            isLoading = true
+        case .requestFailure(let generation, let message):
+            isReadyToSeek = false
+            isSeeking = false
+            isLoading = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didFailWithError: message, loadGeneration: generation)
+            }
+        case .terminal(let identity, let reason):
+            isReadyToSeek = false
+            isSeeking = false
+            isLoading = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self, identity.isValid else { return }
+                switch reason {
+                case .eof: self.delegate?.rendererDidReachEnd(self, identity: identity)
+                case .stopped: break
+                case .error(let message):
+                    self.delegate?.renderer(self, didFailWithError: message, loadGeneration: identity.loadGeneration)
+                }
+            }
+        }
+    }
+
     private static func eventDouble(_ property: mpv_event_property) -> Double? {
         guard property.format == MPV_FORMAT_DOUBLE, let data = property.data else { return nil }
         return data.assumingMemoryBound(to: Double.self).pointee
@@ -1127,7 +1165,7 @@ final class MPVLayerRenderer {
     private func reportPause(_ paused: Bool, position: Double? = nil) {
         guard let receipt = capturePause(paused, position: position) else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, receipt.identity.isActive else { return }
             if let progress = receipt.progress {
                 self.delegate?.renderer(self, didUpdatePosition: progress.position, duration: progress.duration,
                                         cacheSeconds: progress.cacheSeconds, loadGeneration: progress.identity.loadGeneration)
@@ -1153,7 +1191,7 @@ final class MPVLayerRenderer {
                 lastProgressUpdateTime = now
             }
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, receipt.identity.isActive else { return }
                 self.delegate?.renderer(self, didUpdatePosition: receipt.position,
                                         duration: receipt.duration, cacheSeconds: receipt.cacheSeconds,
                                         loadGeneration: receipt.identity.loadGeneration)

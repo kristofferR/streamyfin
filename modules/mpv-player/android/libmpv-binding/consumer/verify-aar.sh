@@ -46,7 +46,7 @@ test "$(rg -cx 'dev/jdtech/mpv/FileIdentity.class' "$temporary/classes")" = 1
 javap -p -s -classpath "$temporary/classes.jar" dev.jdtech.mpv.MPVLib > "$temporary/jni-methods"
 ruby - "$binding_root/libmpv/src/main/cpp/jni_utils.cpp" "$temporary/jni-methods" <<'RUBY'
 native = File.read(ARGV[0]).scan(/GetMethodID\(mpv_MPVLib, "([^"]+)", "([^"]+)"\)/)
-bytecode = File.read(ARGV[1]).scan(/\b(identifiedEventProperty|identifiedEvent|logMessage)\([^)]*\);\n\s+descriptor: ([^\n]+)/)
+bytecode = File.read(ARGV[1]).scan(/\b(identifiedEventProperty|identifiedEvent|identifiedEndFile|logMessage)\([^)]*\);\n\s+descriptor: ([^\n]+)/)
 abort 'no JNI callback lookups found' if native.empty?
 native.each do |signature|
   abort "JNI callback descriptor missing: #{signature.join(' ')}" unless bytecode.include?(signature)

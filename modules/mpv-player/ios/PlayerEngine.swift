@@ -716,7 +716,9 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 		DispatchQueue.main.async { [weak self] in
 			guard let self, loadGeneration == self.loadGeneration else { return }
 			self.delegate?.engine(self, didBecomeReadyToSeek: false)
+			guard loadGeneration == self.loadGeneration else { return }
 			self.delegate?.engine(self, didChangeLoading: false)
+			guard loadGeneration == self.loadGeneration else { return }
 			self.delegate?.engine(self, didFailWithError: message)
 		}
 	}
@@ -772,9 +774,9 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 		#endif
 	}
 
-	func rendererDidReachEnd(_: MPVLayerRenderer) {
+	func rendererDidReachEnd(_: MPVLayerRenderer, identity: MPVFileIdentity.Receipt) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, identity.loadGeneration == self.loadGeneration, identity.isValid else { return }
 			self.delegate?.engineDidReachEnd(self)
 		}
 	}
