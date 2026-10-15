@@ -32,8 +32,8 @@ jobs:
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: d6275aeab9dbb88146af6af99632f92071a5b971
-      PROGRESS_TREE: 433f86c7dc3ba2158077b084f3fd32d1729045a2
+      PROGRESS_REF: a25fc25073da49503efbfd746d7ef4899b9513a1
+      PROGRESS_TREE: 57ddc6a775b1045bb429728127bd726f26debbbf
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
     steps:
       - name: Checkout audited validation branch
@@ -283,8 +283,652 @@ jobs:
         if: always()
         run: rm -rf android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx "$RUNNER_TEMP/identity-tests"
 
-  validate:
+  app_native:
+    name: Verify baseline and candidate app native payload
     needs: android
+    if: github.repository == 'kristofferR/streamyfin'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 130
+    env:
+      CI: 'true'
+      EXPO_TV: '0'
+      EXPO_NO_TELEMETRY: '1'
+      SENTRY_DISABLE_AUTO_UPLOAD: 'true'
+      BASELINE_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
+      BASELINE_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
+      CANDIDATE_REF: a25fc25073da49503efbfd746d7ef4899b9513a1
+      CANDIDATE_TREE: 57ddc6a775b1045bb429728127bd726f26debbbf
+    steps:
+      - name: Checkout audited validation branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify workflow-only override and exact common host
+        shell: bash
+        run: |
+          set -euo pipefail
+          spatial_ref=5e7c9211b8339ddb2178da6a83124b8a9da68353
+          test "$(git rev-parse "$spatial_ref^{tree}")" = 0d394d71a9f008bdff3b0b1451c2135267b00d6c
+          git diff --exit-code "$spatial_ref" HEAD -- . ':!.github/workflows/build-apps.yml'
+          git merge-base --is-ancestor "$spatial_ref" HEAD
+          test "$(git rev-parse "$BASELINE_REF^{tree}")" = "$BASELINE_TREE"
+          test "$(git rev-parse "$CANDIDATE_REF^{tree}")" = "$CANDIDATE_TREE"
+          git diff --exit-code "$BASELINE_REF" "$CANDIDATE_REF" -- package.json bun.lock plugins/withGradleProperties.ts modules/mpv-player/android/build.gradle
+
+      - name: Install Android verifier utilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep ruby unzip coreutils diffutils gawk
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.2'
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android command-line tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        env:
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+          ANDROID_HOME: ${{ runner.temp }}/android-sdk
+        with:
+          cmdline-tools-version: '15859902' # 22.0
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+
+      - name: Verify Android SDK root and command-line tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="$(realpath "$RUNNER_TEMP/android-sdk")"
+          test "$(realpath "$ANDROID_HOME")" = "$sdk_root"
+          test "$(realpath "$ANDROID_SDK_ROOT")" = "$sdk_root"
+          sdk_manager="$(realpath "$(command -v sdkmanager)")"
+          test -x "$sdk_manager"
+          case "$sdk_manager" in
+            "$sdk_root"/*) ;;
+            *) echo 'sdkmanager is outside the configured SDK root'; exit 1 ;;
+          esac
+          printf 'SDK root: %s\nsdkmanager: %s\n' "$sdk_root" "$sdk_manager"
+          "$sdk_manager" --sdk_root="$sdk_root" --version | tee "$RUNNER_TEMP/sdkmanager-version.txt"
+          test "$(tr -d '\r' < "$RUNNER_TEMP/sdkmanager-version.txt")" = '22.0'
+          printf 'SDKMANAGER_PATH=%s\n' "$sdk_manager" >> "$GITHUB_ENV"
+
+      - name: Install exact Android build tools
+        run: '"$SDKMANAGER_PATH" --sdk_root="$ANDROID_SDK_ROOT" "platforms;android-36" "build-tools;35.0.0" "ndk;29.0.14206865" "cmake;3.22.1" "cmake;4.1.2"'
+
+      - name: Preflight Android verifier and native tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in bash dirname mktemp mkdir rm wc sha256sum cut unzip sort uniq cmp rg awk comm ruby cat git curl jq realpath tr tee head c++ make timeout find date tail; do
+            command -v "$tool"
+          done
+          rg --version
+          ruby --version
+          for tool in java jar javap; do
+            test -x "$JAVA_HOME/bin/$tool"
+            test "$(realpath "$(command -v "$tool")")" = "$(realpath "$JAVA_HOME/bin/$tool")"
+          done
+          java -version
+          jar --version
+          javap -version
+          ndk_root="$ANDROID_HOME/ndk/29.0.14206865"
+          test "$(awk -F ' *= *' '$1 == "Pkg.Revision" {print $2}' "$ndk_root/source.properties")" = '29.0.14206865'
+          readelf="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          test -x "$readelf"
+          "$readelf" --version
+          test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --version
+          cmake_bin="$ANDROID_HOME/cmake/4.1.2/bin"
+          for tool in cmake ctest ninja; do
+            test -x "$cmake_bin/$tool"
+            "$cmake_bin/$tool" --version
+          done
+          test "$("$cmake_bin/cmake" --version | head -n 1)" = 'cmake version 4.1.2'
+          for version in 3.22.1 4.1.2; do
+            binary="$ANDROID_HOME/cmake/$version/bin/cmake"
+            test -x "$binary"
+            test "$("$binary" --version | head -n 1)" = "cmake version $version"
+            "$binary" --version
+          done
+          # Binding uses 4.1.2; the unmodified app default is explicitly provisioned at 3.22.1.
+          printf '%s\n' "$cmake_bin" >> "$GITHUB_PATH"
+
+      - name: Write bounded native payload observers
+        id: native_setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/app-native-diagnostics"
+          cat > "$RUNNER_TEMP/audit-app-payload.init.gradle" <<'NATIVE_HELPER_0'
+          import groovy.json.JsonOutput
+          import groovy.json.JsonSlurper
+          import java.security.MessageDigest
+
+          // Observe the authorized native payload build without changing graph, tasks or policies.
+          def output = new File(System.getenv('PROBE_OUTPUT'))
+          def label = System.getenv('PROBE_LABEL')
+          if (!(label in ['baseline', 'candidate'])) throw new GradleException('Unknown probe label')
+          def writeBounded = { String suffix, String text, int limit ->
+              if (text.getBytes('UTF-8').length > limit) throw new GradleException("Probe ${suffix} exceeds text limit")
+              new File(output, "${label}-${suffix}").setText(text, 'UTF-8')
+          }
+          def selectedVariants = []
+          gradle.beforeProject { p ->
+              if (p.path == ':app') p.pluginManager.withPlugin('com.android.application') {
+                  def components = p.extensions.getByName('androidComponents')
+                  components.onVariants(components.selector().withBuildType('debug')) { variant ->
+                      selectedVariants.add(variant)
+                  }
+              }
+          }
+          gradle.projectsEvaluated {
+              def app = gradle.rootProject.findProject(':app')
+              if (app == null) return // Included build plugins may configure their own builds.
+              if (gradle.startParameter.dryRun || gradle.startParameter.taskNames != [':app:stripDebugDebugSymbols']) {
+                  throw new GradleException('Native audit requires exactly :app:stripDebugDebugSymbols without dry-run')
+              }
+              if (app.findProperty('android.builder.sdkDownload')?.toString() != 'false') {
+                  throw new GradleException('Probe must disable automatic SDK downloads')
+              }
+              def info = [source: System.getenv('PROBE_SOURCE'), tree: System.getenv('PROBE_TREE'),
+                          gradle: gradle.gradleVersion, mainTaskExecution: 'native-merge-and-strip', sdkAutoDownload: false]
+              try {
+                  def loader = app.plugins.getPlugin('com.android.application').class.classLoader
+                  info.agp = loader.loadClass('com.android.Version').getField('ANDROID_GRADLE_PLUGIN_VERSION').get(null)
+                  if (info.agp != '8.12.0') throw new GradleException("Unexpected AGP ${info.agp}; probe API audit is for 8.12.0")
+                  def android = app.extensions.getByName('android')
+                  if (android.ndkVersion != '29.0.14206865') throw new GradleException('Unexpected app NDK request')
+                  def sdkComponents = app.extensions.getByName('androidComponents').sdkComponents
+                  def sdk = sdkComponents.sdkDirectory.get().asFile.canonicalFile
+                  def ndk = sdkComponents.ndkDirectory.get().asFile.canonicalFile
+                  if (sdk != new File(System.getenv('ANDROID_HOME')).canonicalFile ||
+                          ndk != new File(sdk, 'ndk/29.0.14206865').canonicalFile) {
+                      throw new GradleException('App resolved SDK/NDK outside pinned roots')
+                  }
+                  def ndkProperties = new Properties()
+                  new File(ndk, 'source.properties').withInputStream { ndkProperties.load(it) }
+                  info.sdkRoot = sdk.path
+                  info.ndk = [requested: android.ndkVersion, root: ndk.path, resolved: ndkProperties.getProperty('Pkg.Revision')]
+                  if (info.ndk.resolved != '29.0.14206865') throw new GradleException('Resolved NDK version mismatch')
+                  info.appAbis = android.defaultConfig.ndk.abiFilters.toList().sort()
+                  info.cmakeFile = android.externalNativeBuild.cmake.path?.canonicalPath
+                  info.cmakeArguments = android.defaultConfig.externalNativeBuild.cmake.arguments.findAll {
+                      it.startsWith('-DANDROID_STL=') || it.startsWith('-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=')
+                  }.collect { it.toString() }
+                  def requestedCmake = android.externalNativeBuild.cmake.version
+                  def requirements = loader.loadClass('com.android.build.gradle.internal.cxx.configure.CmakeVersionRequirements')
+                          .getConstructor(String).newInstance([requestedCmake] as Object[])
+                  def effectiveCmake = requirements.effectiveRequestVersion.toString()
+                  def cmakeRoot = new File(sdk, 'cmake')
+                  def installed = (cmakeRoot.listFiles() ?: []).findAll { it.isDirectory() }.sort { it.name }.collect { directory ->
+                      def properties = new Properties()
+                      def file = new File(directory, 'source.properties')
+                      if (file.isFile()) file.withInputStream { properties.load(it) }
+                      [folder: directory.name, revision: properties.getProperty('Pkg.Revision'),
+                       executable: new File(directory, 'bin/cmake').isFile()]
+                  }
+                  if (installed.size() > 10) throw new GradleException('Unexpected CMake inventory size')
+                  def matching = installed.findAll { it.revision == effectiveCmake && it.executable }
+                  info.cmake = [dslRequested: requestedCmake, effectiveRequiredByAgp: effectiveCmake, installed: installed,
+                                matchingInstalled: matching, agpResolvedExecutable: null,
+                                resolution: matching ? 'PRESENT_BUT_RESOLUTION_DEFERRED_TO_CONFIGURE_TASK' : 'MISSING_EFFECTIVE_VERSION_NO_INSTALL',
+                                note: 'Actual CMake discovery is verified from completed configure task caches below']
+                  if (matching.size() != 1) throw new GradleException('Provision the exact app CMake version before building')
+                  if (selectedVariants.size() != 1) throw new GradleException('Expected exactly one debug app variant')
+                  def packaging = selectedVariants[0].packaging.jniLibs
+                  info.nativePackaging = [pickFirsts: packaging.pickFirsts.get().toList().sort(),
+                                          excludes: packaging.excludes.get().toList().sort(),
+                                          keepDebugSymbols: packaging.keepDebugSymbols.get().toList().sort()]
+              } finally {
+                  writeBounded('config.json', JsonOutput.prettyPrint(JsonOutput.toJson(info)) + '\n', 262144)
+              }
+          }
+          gradle.taskGraph.whenReady { graph ->
+              if (!graph.allTasks.any { it.path == ':app:stripDebugDebugSymbols' }) return
+              if (gradle.startParameter.dryRun) throw new GradleException('Expected actual native payload task')
+              def tasks = graph.allTasks
+              if (tasks.size() > 2000) throw new GradleException('Probe graph exceeds task limit')
+              def rows = ['order\ttask\ttype\tdirect_dependencies\tfinalizers']
+              tasks.eachWithIndex { task, index ->
+                  rows.add([index, task.path, task.class.name,
+                            task.taskDependencies.getDependencies(task).collect { it.path }.sort().join(','),
+                            task.finalizedBy.getDependencies(task).collect { it.path }.sort().join(',')].join('\t'))
+              }
+              writeBounded('tasks.tsv', rows.join('\n') + '\n', 524288)
+              def forbidden = tasks.findAll { task ->
+                  task.name ==~ /(?i).*(upload|publish|install|validateSigning|sign.*Apk).*/ ||
+                      (task.project.path == ':app' && task.name ==~ /(?i)(assemble.*|bundle.*|packageDebug|packageRelease|sign.*)/)
+              }.collect { it.path }
+              if (forbidden) throw new GradleException("Unexpected non-merge producers/finalizers: ${forbidden.join(', ')}")
+          }
+
+          // Resolve only already-provisioned tools, and retain every producer's tool selection.
+          gradle.taskGraph.whenReady { graph ->
+              if (!graph.allTasks.any { it.path == ':app:stripDebugDebugSymbols' }) return
+              def app = gradle.rootProject.project(':app')
+              def loader = app.plugins.getPlugin('com.android.application').class.classLoader
+              def requirementsClass = loader.loadClass('com.android.build.gradle.internal.cxx.configure.CmakeVersionRequirements')
+              def file = new File(output, "${label}-config.json")
+              def info = new JsonSlurper().parse(file)
+              info.nativeTools = []
+              try {
+                  graph.allTasks.findAll { it.class.name.contains('ExternalNativeBuildJsonTask') }
+                          .collect { it.project }.unique { it.path }.sort { it.path }.each { project ->
+                      def android = project.extensions.getByName('android')
+                      def tool = [project: project.path, ndkRequested: android.ndkVersion,
+                                  cmakeRequested: android.externalNativeBuild.cmake.version]
+                      info.nativeTools.add(tool)
+                      def sdk = project.extensions.getByName('androidComponents').sdkComponents
+                      def ndk = sdk.ndkDirectory.get().asFile.canonicalFile
+                      tool.ndkRoot = ndk.path
+                      def properties = new Properties()
+                      new File(ndk, 'source.properties').withInputStream { properties.load(it) }
+                      tool.ndkResolved = properties.getProperty('Pkg.Revision')
+                      if (tool.ndkResolved != '29.0.14206865') throw new GradleException("Unexpected NDK for ${project.path}")
+                      def requirement = requirementsClass.getConstructor(String).newInstance([tool.cmakeRequested] as Object[])
+                      tool.cmakeEffective = requirement.effectiveRequestVersion.toString()
+                      tool.cmakeExecutable = new File(sdk.sdkDirectory.get().asFile, "cmake/${tool.cmakeEffective}/bin/cmake").canonicalPath
+                      if (!new File(tool.cmakeExecutable).isFile()) throw new GradleException("Provision exact CMake ${tool.cmakeEffective} for ${project.path}; auto-download is disabled")
+                  }
+                  if (!info.nativeTools.any { it.project == ':app' }) throw new GradleException('Missing native app producer')
+                  def components = app.configurations.getByName('debugRuntimeClasspath').incoming.resolutionResult.allComponents
+                  def old = components.findAll { component ->
+                      component.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                              component.id.group == 'dev.jdtech.mpv' && component.id.module == 'libmpv'
+                  }
+                  def source = components.findAll { component ->
+                      component.id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
+                              component.id.projectPath == ':streamyfin-libmpv-binding'
+                  }
+                  info.appBindingSelection = [released: old.collect { it.id.displayName }, source: source.collect { it.id.displayName }]
+                  if (label == 'candidate' ? (!old.isEmpty() || source.size() != 1) : (old.size() != 1 || !source.isEmpty())) {
+                      throw new GradleException('Unexpected app-level binding selection')
+                  }
+              } finally {
+                  writeBounded('config.json', JsonOutput.prettyPrint(JsonOutput.toJson(info)) + '\n', 262144)
+              }
+          }
+
+          // Read completed task inputs/outputs; do not alter their dependencies or predicates.
+          gradle.buildFinished { result ->
+              def app = gradle.rootProject.findProject(':app')
+              if (app == null || result.failure != null) return
+              def file = new File(output, "${label}-config.json")
+              def info = new JsonSlurper().parse(file)
+              try {
+              def merge = app.tasks.getByName('mergeDebugNativeLibs')
+              def strip = app.tasks.getByName('stripDebugDebugSymbols')
+              info.outputs = [merged: merge.outputDir.get().asFile.canonicalPath,
+                              stripped: strip.outputDir.get().asFile.canonicalPath]
+              info.selectedInputCandidates = []
+              [project: merge.unfilteredProjectNativeLibs, subproject: merge.subProjectNativeLibs,
+               external: merge.externalLibNativeLibs].each { scope, collection ->
+                  collection.asFileTree.visit { details ->
+                      if (!details.directory && (details.file.name in ['libc++_shared.so', 'libplayer.so'])) {
+                          def fileBytes = details.file.bytes
+                          info.selectedInputCandidates.add([scope: scope, path: details.file.canonicalPath,
+                              relativePath: details.relativePath.pathString,
+                              sha256: MessageDigest.getInstance('SHA-256').digest(fileBytes).encodeHex().toString()])
+                      }
+                  }
+              }
+              info.cmakeCaches = []
+              info.nativeTools.each { tool ->
+                  def project = gradle.rootProject.project(tool.project)
+                  def caches = project.fileTree(dir: project.projectDir, includes: ['.cxx/**/CMakeCache.txt']).files.sort { it.path }
+                  if (caches.isEmpty()) throw new GradleException("Missing actual CMake caches for ${project.path}")
+                  caches.each { cache ->
+                      def values = [:]
+                      cache.eachLine { line ->
+                          def matcher = line =~ /^(CMAKE_COMMAND|CMAKE_CXX_COMPILER|CMAKE_C_COMPILER|CMAKE_MAKE_PROGRAM|ANDROID_ABI):[^=]+=(.*)$/
+                          if (matcher.matches()) values[matcher[0][1]] = matcher[0][2]
+                      }
+                      values.project = project.path
+                      values.cache = cache.canonicalPath
+                      if (new File(values.CMAKE_COMMAND ?: '').canonicalPath != tool.cmakeExecutable) throw new GradleException("Unexpected actual CMake for ${project.path}")
+                      if (!new File(values.CMAKE_CXX_COMPILER ?: '').canonicalPath.startsWith(tool.ndkRoot + '/toolchains/llvm/')) throw new GradleException("Unexpected compiler for ${project.path}")
+                      info.cmakeCaches.add(values)
+                  }
+              }
+              def appCaches = info.cmakeCaches.findAll { it.project == ':app' }
+              if (appCaches.collect { it.ANDROID_ABI }.toSet() != info.appAbis.toSet()) throw new GradleException('Missing actual app CMake ABI evidence')
+              info.cmake.agpResolvedExecutable = appCaches.collect { it.CMAKE_COMMAND }.unique()
+              info.cmake.resolution = 'ACTUAL_CONFIGURE_TASK_CACHE_VERIFIED'
+              } finally {
+                  writeBounded('config.json', JsonOutput.prettyPrint(JsonOutput.toJson(info)) + '\n', 262144)
+              }
+          }
+          NATIVE_HELPER_0
+          cat > "$RUNNER_TEMP/audit-app-payload.rb" <<'NATIVE_HELPER_1'
+          #!/usr/bin/env ruby
+          # Read completed native task outputs. Never rewrite an ELF, packaging policy or input.
+          require 'json'
+          require 'digest'
+          require 'open3'
+          require 'tmpdir'
+
+          directory, label, readelf, released = ARGV
+          abort 'usage: audit-app-payload.rb diagnostics baseline|candidate pinned-readelf released.aar' unless
+            directory && %w[baseline candidate].include?(label) && File.executable?(readelf.to_s) && File.file?(released.to_s)
+          abort 'released input checksum mismatch' unless Digest::SHA256.file(released).hexdigest ==
+            'df146592480fc8418415a06b1f1a1d6318b0088e21f52254b0e9a82b61ca8fa2'
+          config = JSON.parse(File.read(File.join(directory, "#{label}-config.json")))
+          abis = %w[arm64-v8a armeabi-v7a x86_64]
+          abort 'unexpected app ABI scope' unless config.fetch('appAbis').sort == abis.sort
+
+          def run(*arguments)
+            output, error, status = Open3.capture3(*arguments)
+            raise "#{arguments.first} failed: #{error}" unless status.success?
+            output
+          end
+
+          def symbols(readelf, file)
+            run(readelf, '--dyn-syms', '--wide', file).lines.map(&:split).select do |fields|
+              fields.length >= 8 && %w[GLOBAL WEAK].include?(fields[4])
+            end
+          end
+
+          def exports(symbols)
+            symbols.select { |f| f[6] != 'UND' && %w[DEFAULT PROTECTED].include?(f[5]) }.map { |f| f[7] }
+          end
+
+          def provided?(requirement, available)
+            name, version = requirement.split('@', 2)
+            available.fetch(name, []).any? { |export| version ? export.split(/@@?/, 2)[1] == version : !export.include?('@') || export.include?('@@') }
+          end
+
+          def index_exports(names)
+            names.group_by { |name| name.split('@', 2).first }
+          end
+
+          def inventory(root, abis)
+            files = Dir.glob(File.join(root, '**', '*.so')).sort
+            raise 'missing or excessive native output' if files.empty? || files.size > 1000
+            files.to_h do |file|
+              abi = file.split('/').reverse.find { |part| abis.include?(part) }
+              raise "unexpected native ABI path #{file}" unless abi
+              ["#{abi}/#{File.basename(file)}", file]
+            end.tap { |map| raise 'duplicate native members' unless map.size == files.size }
+          end
+
+          def identity(readelf, file)
+            header = run(readelf, '--file-header', '--wide', file)
+            dynamic = run(readelf, '--dynamic', '--wide', file)
+            notes = run(readelf, '--notes', '--wide', file)
+            { size: File.size(file), sha256: Digest::SHA256.file(file).hexdigest,
+              elf: header.lines.grep(/Class:|Machine:/).map(&:strip),
+              soname: dynamic[/Library soname: \[([^\]]+)\]/, 1],
+              needed: dynamic.scan(/Shared library: \[([^\]]+)\]/).flatten.sort,
+              build_id: notes[/Build ID: (\h+)/, 1] }
+          end
+
+          errors = []
+          report = { source: config.fetch('source'), tree: config.fetch('tree'), app_abis: abis,
+                     binding_selection: config.fetch('appBindingSelection'), modules: {}, runtimes: {},
+                     errors: errors, scope: 'Actual app native merge/strip and C++ dynamic symbol/version coverage; no APK, device execution or general ABI-behavior proof.' }
+          requirements = ["abi\tmodule\tcpp_imports\tstrong\tweak\tmissing_strong\tmissing_weak\trequirements_sha256"]
+          begin
+            merged = inventory(config.fetch('outputs').fetch('merged'), abis)
+            stripped = inventory(config.fetch('outputs').fetch('stripped'), abis)
+            raise 'merge/strip member sets differ' unless merged.keys.sort == stripped.keys.sort
+            member_names = run('unzip', '-Z1', released).lines.map(&:strip).grep(%r{\Ajni/[^/]+/[^/]+\.so\z})
+            raise 'duplicate released members' unless member_names.uniq.size == member_names.size
+            cores = member_names.map { |member| File.basename(member) }.uniq - %w[libplayer.so libc++_shared.so]
+            raise 'unexpected published media core set' unless cores.size == 8
+            Dir.mktmpdir('app-native-audit') do |temporary|
+              abis.each do |abi|
+                originals = {}
+                (cores + %w[libplayer.so libc++_shared.so]).each do |name|
+                  path = File.join(temporary, "#{abi}-#{name}")
+                  File.open(path, 'wb') do |output|
+                    raise "cannot extract #{abi}/#{name}" unless system('unzip', '-p', released, "jni/#{abi}/#{name}", out: output)
+                  end
+                  originals[name] = path
+                end
+                runtime_key = "#{abi}/libc++_shared.so"
+                runtime = merged.fetch(runtime_key)
+                final_runtime = stripped.fetch(runtime_key)
+                selected_exports = exports(symbols(readelf, final_runtime))
+                original_exports = exports(symbols(readelf, originals.fetch('libc++_shared.so')))
+                available = index_exports(selected_exports)
+                family_names = (selected_exports + original_exports).map { |name| name.split('@', 2).first }.to_h { |name| [name, true] }
+                providers = config.fetch('selectedInputCandidates').select do |provider|
+                  provider.fetch('path').end_with?('/libc++_shared.so') &&
+                    provider.fetch('path').split('/').include?(abi)
+                end
+                first = providers.first
+                errors << "#{abi}: no runtime provider evidence" unless first
+                selected = identity(readelf, runtime)
+                final = identity(readelf, final_runtime)
+                original = identity(readelf, originals.fetch('libc++_shared.so'))
+                errors << "#{abi}: merge runtime differs from first ordered provider" unless first && first.fetch('sha256') == selected.fetch(:sha256)
+                # Existing host CMake output has priority over subprojects/external AARs.
+                errors << "#{abi}: app runtime selection changed from project output" unless first && first.fetch('scope') == 'project'
+                errors << "#{abi}: stripped runtime changed exported symbol/version set" unless selected_exports.sort == exports(symbols(readelf, runtime)).sort
+                report[:runtimes][abi] = { merged: selected, stripped: final, released: original,
+                  ordered_providers: providers, selected_provider: first,
+                  final_equals_released: final.fetch(:sha256) == original.fetch(:sha256),
+                  dynamic_exports: selected_exports.size,
+                  version_info_sha256: Digest::SHA256.hexdigest(run(readelf, '--version-info', '--wide', final_runtime)) }
+                cores.each do |name|
+                  key = "#{abi}/#{name}"
+                  original_hash = Digest::SHA256.file(originals.fetch(name)).hexdigest
+                  %w[merged stripped].each do |stage|
+                    paths = stage == 'merged' ? merged : stripped
+                    errors << "#{key}: #{stage} changed published core bytes" unless paths[key] && Digest::SHA256.file(paths[key]).hexdigest == original_hash
+                  end
+                end
+                player_key = "#{abi}/libplayer.so"
+                player = merged.fetch(player_key)
+                player_exports = exports(symbols(readelf, player))
+                old_player_exports = exports(symbols(readelf, originals.fetch('libplayer.so')))
+                errors << "#{abi}: lost legacy JNI exports" unless (old_player_exports.grep(/\AJava_/) - player_exports).empty?
+                native_load = 'Java_dev_jdtech_mpv_MPVLib_nativeLoadFile'
+                errors << "#{abi}: unexpected native binding generation" unless player_exports.include?(native_load) == (label == 'candidate')
+                player_providers = config.fetch('selectedInputCandidates').select do |provider|
+                  provider.fetch('path').end_with?('/libplayer.so') && provider.fetch('path').split('/').include?(abi)
+                end
+                expected_scope = label == 'candidate' ? 'subproject' : 'external'
+                errors << "#{abi}: unexpected player provider" unless player_providers.size == 1 &&
+                  player_providers[0].fetch('scope') == expected_scope && player_providers[0].fetch('sha256') == Digest::SHA256.file(player).hexdigest
+                report[:runtimes][abi][:player_providers] = player_providers
+                stripped.select { |key, _| key.start_with?("#{abi}/") }.each do |key, file|
+                  metadata = identity(readelf, file)
+                  metadata[:merged_sha256] = Digest::SHA256.file(merged.fetch(key)).hexdigest
+                  metadata[:cpp_runtime_dependency] = metadata.fetch(:needed).include?('libc++_shared.so')
+                  imports = symbols(readelf, file).select do |fields|
+                    name = fields[7]
+                    base = name.split('@', 2).first
+                    fields[6] == 'UND' && !name.match?(/@LIBC(?:_|\z)/) &&
+                      (family_names[base] || base.match?(/\A(?:_Z(?:N[KOR]*St|St|[TGV][A-Za-z]*N?St|n[aw]|d[al])|__cxa|__gxx|__dynamic_cast|_Unwind)/))
+                  end
+                  missing = imports.reject { |fields| provided?(fields[7], available) }
+                  strong = missing.select { |fields| fields[4] == 'GLOBAL' }.map { |fields| fields[7] }.sort
+                  weak = missing.select { |fields| fields[4] == 'WEAK' }.map { |fields| fields[7] }.sort
+                  metadata[:cpp_imports] = imports.size
+                  metadata[:missing_strong_cpp] = strong
+                  metadata[:optional_missing_weak_cpp] = weak
+                  errors << "#{key}: missing strong runtime symbols #{strong.join(',')}" unless strong.empty?
+                  report[:modules][key] = metadata
+                  requirements << [abi, File.basename(file), imports.size, imports.count { |f| f[4] == 'GLOBAL' },
+                    imports.count { |f| f[4] == 'WEAK' }, strong.join(','), weak.join(','),
+                    Digest::SHA256.hexdigest(imports.map { |f| "#{f[4]} #{f[7]}" }.sort.join("\n"))].join("\t")
+                end
+                errors << "#{abi}: player lacks shared runtime dependency/import evidence" unless
+                  report[:modules].fetch(player_key).fetch(:cpp_runtime_dependency) && report[:modules].fetch(player_key).fetch(:cpp_imports).positive?
+              end
+            end
+          rescue StandardError => error
+            errors << "#{error.class}: #{error.message}"
+          ensure
+            { 'native-audit.json' => JSON.pretty_generate(report) + "\n", 'cpp-requirements.tsv' => requirements.join("\n") + "\n" }.each do |suffix, text|
+              raise 'audit text exceeds limit' if text.bytesize > 1_048_576
+              File.write(File.join(directory, "#{label}-#{suffix}"), text)
+            end
+          end
+          abort errors.join("\n") unless errors.empty?
+          puts "#{label}: #{report[:modules].size} final native members checked across #{abis.size} app ABIs; all published app media cores unchanged; runtime provider and C++ requirements recorded"
+
+          if label == 'candidate'
+            baseline_config = JSON.parse(File.read(File.join(directory, 'baseline-config.json')))
+            baseline = JSON.parse(File.read(File.join(directory, 'baseline-native-audit.json')))
+            current = JSON.parse(File.read(File.join(directory, 'candidate-native-audit.json')))
+            comparison = { baseline_source: baseline.fetch('source'), candidate_source: current.fetch('source'), errors: [], runtimes: {} }
+            %w[gradle agp appAbis ndk nativePackaging cmakeArguments].each do |field|
+              comparison[:errors] << "host #{field} differs" unless baseline_config[field] == config[field]
+            end
+            comparison[:errors] << 'native member sets differ' unless baseline.fetch('modules').keys.sort == current.fetch('modules').keys.sort
+            current.fetch('modules').each do |key, metadata|
+              next if key.end_with?('/libplayer.so')
+              comparison[:errors] << "#{key}: final app native bytes differ from baseline" unless
+                baseline.fetch('modules').fetch(key).fetch('sha256') == metadata.fetch('sha256')
+            end
+            abis.each do |abi|
+              old = baseline.fetch('runtimes').fetch(abi)
+              new = current.fetch('runtimes').fetch(abi)
+              comparison[:runtimes][abi] = { selected_scope: new.fetch('selected_provider').fetch('scope'),
+                merged_sha256: new.fetch('merged').fetch('sha256'), final_sha256: new.fetch('stripped').fetch('sha256'),
+                final_equals_released: new.fetch('final_equals_released'),
+                baseline_equal: old.fetch('stripped').fetch('sha256') == new.fetch('stripped').fetch('sha256') }
+            end
+            File.write(File.join(directory, 'comparison.json'), JSON.pretty_generate(comparison) + "\n")
+            abort comparison[:errors].join("\n") unless comparison[:errors].empty?
+            puts 'Baseline/candidate app native payload equality checked except intentionally rebuilt libplayer; existing runtime selection unchanged'
+          end
+          NATIVE_HELPER_1
+          cat > "$RUNNER_TEMP/build-app-payload.sh" <<'NATIVE_HELPER_2'
+          #!/bin/bash
+          set -euo pipefail
+          label="${1:?baseline or candidate}"
+          source_ref="${2:?exact ref}"
+          source_tree="${3:?exact tree}"
+          case "$label" in baseline|candidate) ;; *) exit 1 ;; esac
+          test "$(git rev-parse HEAD)" = "$source_ref"
+          test "$(git rev-parse HEAD^{tree})" = "$source_tree"
+          diagnostics="$RUNNER_TEMP/app-native-diagnostics"
+          mkdir -p "$diagnostics"
+          raw="$RUNNER_TEMP/$label-native-raw.log"
+          started="$(date +%s)"
+          finish() {
+              result=$?
+              trap - EXIT
+              if [ -f "$raw" ]; then tail -c 262144 "$raw" > "$diagnostics/$label-build.log"; fi
+              jq -n --arg source "$source_ref" --arg tree "$source_tree" --argjson exit_code "$result" \
+                  --argjson elapsed_seconds "$(( $(date +%s) - started ))" \
+                  --arg lock_sha256 "$(sha256sum bun.lock | cut -d ' ' -f 1)" \
+                  --arg package_sha256 "$(sha256sum package.json | cut -d ' ' -f 1)" \
+                  '{source:$source,tree:$tree,exit_code:$exit_code,elapsed_seconds:$elapsed_seconds,lock_sha256:$lock_sha256,package_sha256:$package_sha256,main_task_execution:"native-merge-and-strip",apk_or_signing:false}' \
+                  > "$diagnostics/$label-status.json"
+              exit "$result"
+          }
+          trap finish EXIT
+          timeout --signal=TERM --kill-after=30s 300s bun install --frozen-lockfile
+          timeout --signal=TERM --kill-after=30s 180s bun run expo prebuild --platform android --clean --no-install
+          git diff --exit-code -- bun.lock package.json
+          if [ "$label" = candidate ]; then
+              (cd modules/mpv-player/android/libmpv-binding && sha256sum -c consumer/source-inputs.sha256)
+          fi
+          export PROBE_OUTPUT="$diagnostics" PROBE_LABEL="$label" PROBE_SOURCE="$source_ref" PROBE_TREE="$source_tree"
+          (
+              cd android
+              timeout --signal=TERM --kill-after=30s 3000s ./gradlew --no-daemon --no-configuration-cache --no-build-cache \
+                  --max-workers=1 --console=plain -Pandroid.builder.sdkDownload=false \
+                  --init-script "$RUNNER_TEMP/audit-app-payload.init.gradle" :app:stripDebugDebugSymbols
+          ) 2>&1 | tee "$raw"
+          git diff --exit-code -- bun.lock package.json
+          mapfile -t released_inputs < <(find "$HOME/.gradle/caches/modules-2/files-2.1/dev.jdtech.mpv/libmpv/1.0.0" -type f -name '*.aar' | sort)
+          test "${#released_inputs[@]}" -eq 1
+          readelf="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          ruby "$RUNNER_TEMP/audit-app-payload.rb" "$diagnostics" "$label" "$readelf" "${released_inputs[0]}"
+          NATIVE_HELPER_2
+
+      - name: Checkout exact published-dependency baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.BASELINE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and audit baseline native merge and stripped payload
+        id: baseline_native
+        shell: bash
+        run: bash "$RUNNER_TEMP/build-app-payload.sh" baseline "$BASELINE_REF" "$BASELINE_TREE"
+
+      - name: Remove baseline native build and dependencies
+        id: baseline_cleanup
+        if: always()
+        shell: bash
+        run: rm -rf node_modules android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx
+
+      - name: Checkout exact imported-runtime candidate
+        if: ${{ !cancelled() && steps.baseline_native.outcome == 'success' && steps.baseline_cleanup.outcome == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.CANDIDATE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and audit candidate native merge and stripped payload
+        if: ${{ !cancelled() && steps.baseline_native.outcome == 'success' && steps.baseline_cleanup.outcome == 'success' }}
+        shell: bash
+        run: bash "$RUNNER_TEMP/build-app-payload.sh" candidate "$CANDIDATE_REF" "$CANDIDATE_TREE"
+
+      - name: Enforce thirteen named native text artifact limits
+        id: text_bounds
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostics="$RUNNER_TEMP/app-native-diagnostics"
+          for label in baseline candidate; do
+            for spec in config.json:262144 tasks.tsv:524288 native-audit.json:1048576 cpp-requirements.tsv:1048576 build.log:262144 status.json:4096; do
+              file="$diagnostics/$label-${spec%:*}"
+              if [ -f "$file" ]; then test "$(wc -c < "$file")" -le "${spec#*:}"; fi
+            done
+          done
+          if [ -f "$diagnostics/comparison.json" ]; then test "$(wc -c < "$diagnostics/comparison.json")" -le 131072; fi
+
+      - name: Retain native provider and compatibility text for one day
+        if: ${{ always() && steps.text_bounds.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-native-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/app-native-diagnostics/baseline-config.json
+            ${{ runner.temp }}/app-native-diagnostics/baseline-tasks.tsv
+            ${{ runner.temp }}/app-native-diagnostics/baseline-native-audit.json
+            ${{ runner.temp }}/app-native-diagnostics/baseline-cpp-requirements.tsv
+            ${{ runner.temp }}/app-native-diagnostics/baseline-build.log
+            ${{ runner.temp }}/app-native-diagnostics/baseline-status.json
+            ${{ runner.temp }}/app-native-diagnostics/candidate-config.json
+            ${{ runner.temp }}/app-native-diagnostics/candidate-tasks.tsv
+            ${{ runner.temp }}/app-native-diagnostics/candidate-native-audit.json
+            ${{ runner.temp }}/app-native-diagnostics/candidate-cpp-requirements.tsv
+            ${{ runner.temp }}/app-native-diagnostics/candidate-build.log
+            ${{ runner.temp }}/app-native-diagnostics/candidate-status.json
+            ${{ runner.temp }}/app-native-diagnostics/comparison.json
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: Remove final native build and dependencies
+        if: always()
+        shell: bash
+        run: rm -rf node_modules android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx
+
+  validate:
+    needs: [android, app_native]
 
     if: github.repository == 'kristofferR/streamyfin'
     runs-on: macos-26
@@ -297,8 +941,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: d6275aeab9dbb88146af6af99632f92071a5b971
-      PROGRESS_TREE: 433f86c7dc3ba2158077b084f3fd32d1729045a2
+      PROGRESS_REF: a25fc25073da49503efbfd746d7ef4899b9513a1
+      PROGRESS_TREE: 57ddc6a775b1045bb429728127bd726f26debbbf
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
