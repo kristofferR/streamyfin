@@ -140,7 +140,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for tool in bash dirname mktemp rm sha256sum cut unzip sort uniq cmp rg awk comm ruby cat git curl jq realpath tr tee head c++ make; do
+          for tool in bash dirname mktemp mkdir rm wc sha256sum cut unzip sort uniq cmp rg awk comm ruby cat git curl jq realpath tr tee head c++ make; do
             command -v "$tool"
           done
           rg --version
@@ -191,23 +191,91 @@ jobs:
         run: ./gradlew --no-daemon :streamyfin-libmpv-binding:tasks --all :mpv-player:tasks --all
 
       - name: Compile source and consumer modules and run unit tests
+        id: android_compile
         if: inputs.android_run_id == ''
         working-directory: android
         run: ./gradlew --no-daemon :streamyfin-libmpv-binding:assembleDebug :streamyfin-libmpv-binding:testDebugUnitTest :mpv-player:compileDebugKotlin :mpv-player:testDebugUnitTest
 
-      - name: Verify ABI, JNI and source-only dependency selection
+      - name: Report every native member before strict verification
         if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          binding=modules/mpv-player/android/libmpv-binding
+          released="$(cat "$binding/consumer/build/releasedMedia/artifact-path.txt")"
+          candidate="$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar"
+          diagnostics="$RUNNER_TEMP/native-byte-diagnostics"
+          mkdir -p "$diagnostics"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          unzip -Z1 "$released" | rg '^jni/[^/]+/[^/]+\.so$' | sort > "$temporary/released-members"
+          unzip -Z1 "$candidate" | rg '^jni/[^/]+/[^/]+\.so$' | sort > "$temporary/candidate-members"
+          sort -u "$temporary/released-members" "$temporary/candidate-members" > "$temporary/all-members"
+          report="$diagnostics/native-members.tsv"
+          printf '# source=%s\n' "$PROGRESS_REF" > "$report"
+          printf 'abi\tname\trole\treleased_size\treleased_sha256\tcandidate_size\tcandidate_sha256\tcomparison\n' >> "$report"
+          runtime_differences=0
+          core_differences=0
+          while IFS= read -r member; do
+            abi="${member#jni/}"
+            abi="${abi%%/*}"
+            name="${member##*/}"
+            old_size=-; old_hash=-; new_size=-; new_hash=-
+            if rg -Fxq -- "$member" "$temporary/released-members"; then
+              unzip -p "$released" "$member" > "$temporary/old.so"
+              old_size="$(wc -c < "$temporary/old.so")"
+              old_hash="$(sha256sum "$temporary/old.so" | cut -d ' ' -f 1)"
+            fi
+            if rg -Fxq -- "$member" "$temporary/candidate-members"; then
+              unzip -p "$candidate" "$member" > "$temporary/new.so"
+              new_size="$(wc -c < "$temporary/new.so")"
+              new_hash="$(sha256sum "$temporary/new.so" | cut -d ' ' -f 1)"
+            fi
+            comparison=DIFFERENT
+            if [ "$old_hash" = - ]; then comparison=ADDED
+            elif [ "$new_hash" = - ]; then comparison=MISSING
+            elif [ "$old_size" = "$new_size" ] && [ "$old_hash" = "$new_hash" ]; then comparison=MATCH
+            fi
+            case "$name" in
+              libplayer.so) role=rebuilt-binding ;;
+              libc++_shared.so) role=shared-runtime
+                if [ "$comparison" != MATCH ]; then runtime_differences=$((runtime_differences + 1)); fi ;;
+              *) role=released-core
+                if [ "$comparison" != MATCH ]; then core_differences=$((core_differences + 1)); fi ;;
+            esac
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$abi" "$name" "$role" "$old_size" "$old_hash" "$new_size" "$new_hash" "$comparison" >> "$report"
+          done < "$temporary/all-members"
+          printf '# differences_excluding_rebuilt_binding: runtime=%s cores=%s\n' "$runtime_differences" "$core_differences" >> "$report"
+          cat "$report"
+
+      - name: Verify ABI, JNI and source-only dependency selection
+        if: ${{ !cancelled() && inputs.android_run_id == '' && steps.android_compile.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           binding=modules/mpv-player/android/libmpv-binding
           input="$(cat "$binding/consumer/build/releasedMedia/artifact-path.txt")"
-          bash "$binding/consumer/verify-aar.sh" "$input" "$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar" "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          diagnostics="$RUNNER_TEMP/native-byte-diagnostics"
+          mkdir -p "$diagnostics"
+          # Only the audited verifier is traced, never setup/authentication/env.
+          PS4='+ verifier:${LINENO}: ' bash -x "$binding/consumer/verify-aar.sh" "$input" "$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar" "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" 2>&1 | tee "$diagnostics/strict-verifier.log"
           cd android
           ./gradlew --no-daemon :streamyfin-libmpv-binding:verifyHostUsesSourceBinding
           ./gradlew --no-daemon :mpv-player:dependencyInsight --dependency dev.jdtech.mpv:libmpv --configuration debugRuntimeClasspath
           cd ..
           git diff --exit-code -- bun.lock package.json
+
+      - name: Retain native byte diagnostics as short-lived text only
+        if: always() && inputs.android_run_id == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-byte-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-byte-diagnostics/native-members.tsv
+            ${{ runner.temp }}/native-byte-diagnostics/strict-verifier.log
+          retention-days: 1
+          if-no-files-found: warn
 
       - name: Remove Android build output
         if: always()
