@@ -1084,7 +1084,7 @@ final class MPVLayerRenderer {
 
     private func handleFileStart(source: MPVFileIdentity.Handle, entryID: Int64?) {
         guard fileIdentity.start(handle: source, entryID: entryID) != nil else { return }
-        // A redirected child must not inherit the previous child's clock/cache.
+        // An accepted physical START owns a fresh clock/cache.
         cachedPosition = loadStartPosition
         cachedDuration = 0
         cachedCacheSeconds = 0
@@ -1102,9 +1102,6 @@ final class MPVLayerRenderer {
     private func deliverEndOutcome(_ outcome: MPVFileIdentity.EndOutcome) {
         switch outcome {
         case .ignored: return
-        case .redirected:
-            isReadyToSeek = false
-            isLoading = true
         case .requestFailure(let generation, let message):
             isReadyToSeek = false
             isSeeking = false
@@ -1114,6 +1111,7 @@ final class MPVLayerRenderer {
                 self.delegate?.renderer(self, didFailWithError: message, loadGeneration: generation)
             }
         case .terminal(let identity, let reason):
+            if case .error = reason { stopRejectedInput(identity) }
             isReadyToSeek = false
             isSeeking = false
             isLoading = false
@@ -1126,6 +1124,16 @@ final class MPVLayerRenderer {
                     self.delegate?.renderer(self, didFailWithError: message, loadGeneration: identity.loadGeneration)
                 }
             }
+        }
+    }
+
+    private func stopRejectedInput(_ identity: MPVFileIdentity.Receipt) {
+        // The same queue owns load/begin, handle changes and this command.
+        queue.async { [weak self] in
+            guard let self, let handle = self.mpv,
+                  self.identityHandle == handle, self.identitySource === identity.handle,
+                  self.fileIdentity.ownsTerminal(identity) else { return }
+            self.commandSync(handle, ["stop"])
         }
     }
 

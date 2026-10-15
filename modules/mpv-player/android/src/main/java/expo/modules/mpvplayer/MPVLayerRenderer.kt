@@ -164,8 +164,6 @@ class MPVLayerRenderer(
     @Volatile private var seekReportGeneration = 0L
     @Volatile private var seekReportRequestId: Long? = null
     @Volatile private var activeSeekReportRequestId: Long? = null
-    // libmpv can announce one EOF through both the property and END_FILE.
-    private var didNotifyPlaybackEnd: Boolean = false
     
     // Video dimensions
     private var _videoWidth: Int = 0
@@ -774,6 +772,7 @@ class MPVLayerRenderer(
         mpv?.observeProperty("chapter-list/count", MPV_FORMAT_INT64)
         mpv?.observeProperty("paused-for-cache", MPV_FORMAT_FLAG)
         mpv?.observeProperty("demuxer-cache-duration", MPV_FORMAT_DOUBLE)
+        mpv?.observeProperty("eof-reached", MPV_FORMAT_FLAG)
         // Video dimensions for PiP aspect ratio
         mpv?.observeProperty("video-params/w", MPV_FORMAT_INT64)
         mpv?.observeProperty("video-params/h", MPV_FORMAT_INT64)
@@ -1250,11 +1249,26 @@ class MPVLayerRenderer(
             is MpvEventSnapshot.Event -> handleEvent(receipt, event)
             is MpvEventSnapshot.EndFile, is MpvEventSnapshot.Failure -> {
                 if (!loadPolicy.takeTerminal(receipt)) return
+                if (event is MpvEventSnapshot.Failure) stopRejectedInput(receipt)
                 finishTerminalLoad(receipt)
                 event.reportTerminal(
                     onEof = { notifyPlaybackEnd(receipt) },
                     onError = { message -> notify(receipt) { it.onError(message) } },
                 )
+            }
+        }
+    }
+
+    private fun stopRejectedInput(receipt: MpvReceipt) {
+        // Loads, rejected-input stops and teardown share this worker. A new
+        // load cannot reach mpv between this ownership check and the command.
+        loadExecutor.execute {
+            val handle = receipt.request.handle
+            if (mpv !== handle || !loadPolicy.ownsTerminal(receipt)) return@execute
+            try {
+                handle.command(arrayOf("stop"))
+            } catch (error: Exception) {
+                Log.w(TAG, "Could not stop rejected mpv input", error)
             }
         }
     }
@@ -1321,6 +1335,8 @@ class MPVLayerRenderer(
                     notify(receipt) { it.onLoadingChanged(value) }
                 }
             }
+            "eof-reached" -> if (value) notifyPlaybackEnd(receipt)
+            // Native false resets the policy's deduplication at receipt time.
         }
     }
 
@@ -1366,7 +1382,6 @@ class MPVLayerRenderer(
                 val audioId = initialAudioId
                 val subtitleId = initialSubtitleId ?: -1
                 pendingExternalSubtitles = emptyList()
-                didNotifyPlaybackEnd = false
                 // Reconcile one-shot metadata on the main owner before the
                 // asynchronous subtitle fetch; never apply an older cache later.
                 cachedDuration = handle.getPropertyDouble("duration") ?: cachedDuration
@@ -1404,6 +1419,8 @@ class MPVLayerRenderer(
                                 _isLoading = false
                                 notify(receipt) { it.onLoadingChanged(false) }
                             }
+                            if (!isCurrent(receipt)) return@post
+                            loadPolicy.pendingEof()?.let(::notifyPlaybackEnd)
                         }
                     } catch (error: Exception) {
                         mainHandler.post { notify(receipt) { it.onError("Could not prepare the loaded mpv file") } }
@@ -1446,8 +1463,7 @@ class MPVLayerRenderer(
     }
 
     private fun notifyPlaybackEnd(receipt: MpvReceipt) {
-        if (didNotifyPlaybackEnd) return
-        didNotifyPlaybackEnd = true
+        if (!isCurrent(receipt) || !loadPolicy.takePlaybackEnd(receipt)) return
         notify(receipt) { it.onPlaybackEnded() }
     }
 }

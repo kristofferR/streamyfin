@@ -106,21 +106,23 @@ struct ProgressGenerationTests {
         files.begin(handle: source, generation: 1)
         files.bind(handle: source, generation: 1, entryID: 10)
         files.start(handle: source, entryID: 10)
-        _ = files.end(handle: source, payload: MPVEndFile(entryID: 10, reason: 5, error: 0, insertID: 11, insertCount: 2))
-        files.start(handle: source, entryID: 11)
         enqueueSuccess(redirected, renderer, files.receipt!.delivery)
-        _ = files.end(handle: source, payload: MPVEndFile(entryID: 11, reason: 0, error: 0, insertID: 0, insertCount: 0))
-        files.start(handle: source, entryID: 12)
-        precondition(files.receipt!.loadGeneration == redirected.loadGeneration)
+        _ = files.end(handle: source, payload: MPVEndFile(entryID: 10, reason: 5, error: 0, insertID: 11, insertCount: 2))
+        precondition(files.start(handle: source, entryID: 11) == nil)
+        redirected.renderer(renderer, didFailWithError: "unsupported playlist", loadGeneration: 1)
         DispatchQueue.main.drain()
         precondition(redirected.cachedPosition == 0 && redirected.cachedDuration == 0 && redirected.pipController!.position == 0)
         precondition(redirected.pipController!.rate == 1 && redirected.nowPlaying.isEmpty && redirected.delegate!.positions.isEmpty && redirected.delegate!.pauses.isEmpty)
-        precondition(redirected.delegate!.readiness.isEmpty && redirected.delegate!.tracks.isEmpty && redirected.delegate!.loading.isEmpty,
-                     "child B invalidates child A at final delivery despite identical request generation")
+        precondition(redirected.delegate!.readiness == [false] && redirected.delegate!.tracks.isEmpty && redirected.delegate!.loading == [false],
+                     "redirect rejection revokes first-hop success before final delivery within the same generation")
+        precondition(redirected.delegate!.errors == ["unsupported playlist"])
+        files.begin(handle: source, generation: 1)
+        files.bind(handle: source, generation: 1, entryID: 20)
+        files.start(handle: source, entryID: 20)
         enqueueSuccess(redirected, renderer, files.receipt!.delivery)
         DispatchQueue.main.drain()
         precondition(redirected.delegate!.positions == [44] && redirected.delegate!.pauses == [true])
-        precondition(redirected.delegate!.readiness == [true] && redirected.delegate!.tracks == [true] && redirected.delegate!.loading == [false])
+        precondition(redirected.delegate!.readiness == [false, true] && redirected.delegate!.tracks == [true] && redirected.delegate!.loading == [false, false])
 
         let pending = MPVPlayerEngine()
         files.begin(handle: source, generation: 1)
@@ -279,9 +281,11 @@ struct ProgressGenerationTests {
         let oldFile = files.receipt!
         _ = files.end(handle: source, payload: MPVEndFile(entryID: 1, reason: 0, error: 0, insertID: 0, insertCount: 0))
         eofEngine.rendererDidReachEnd(renderer, identity: oldFile)
-        files.start(handle: source, entryID: 1) // Same request, new physical playback.
+        files.begin(handle: source, generation: 1)
+        files.bind(handle: source, generation: 1, entryID: 3)
+        files.start(handle: source, entryID: 3)
         DispatchQueue.main.drain()
-        precondition(eofEngine.delegate!.ends == 0, "final EOF rejects a retired physical file even within one generation")
+        precondition(eofEngine.delegate!.ends == 0, "final EOF rejects a revoked physical permit even before Engine generation changes")
         let replaced = files.receipt!
         eofEngine.rendererDidReachEnd(renderer, identity: replaced)
         eofEngine.loadGeneration = 2

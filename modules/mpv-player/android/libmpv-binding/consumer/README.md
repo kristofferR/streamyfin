@@ -6,7 +6,7 @@ This is the fork-owned source binding based on libmpv-android 1.0.0 at
 review candidate. No replacement AAR is released. Compiler, JNI/runtime and
 consumer validation remain unrun for the current changes.
 
-The local END payload addition and checked redirect lineage are documented in
+The local END payload addition, unsupported-playlist behavior and baseline EOF limits are documented in
 [END_FILE-evidence.md](END_FILE-evidence.md). Legacy callbacks are preserved;
 media cores, runtime-byte verification and pinned headers are unchanged.
 The following sections retain the source-consumption design and its validation

@@ -37,18 +37,12 @@ struct MPVFileIdentity {
     enum Stage { case pending, prepared, terminal }
     enum EndReason { case eof, stopped, error(String) }
     enum EndOutcome {
-        case ignored, redirected
+        case ignored
         case terminal(Receipt, EndReason)
         case requestFailure(UInt, String)
     }
     private enum Early { case start(Int64?), end(MPVEndFile) }
-    private struct Range {
-        let first: Int64
-        let last: Int64
-        func contains(_ entry: Int64) -> Bool { entry >= first && entry <= last }
-    }
     private static let maxEarlyEvents = 64
-    private static let maxRedirects = 64
     private var requestedHandle: Handle?
     private var requestedGeneration: UInt = 0
     private var rootID: Int64?
@@ -57,10 +51,7 @@ struct MPVFileIdentity {
     private var activeReceipt: Receipt?
     private var pendingPermit: Permit?
     private var stage = Stage.pending
-    private var mayContinueAfterEof = false
     private var early: [Early] = []
-    private var ranges: [Range] = []
-    private var retired: Set<Int64> = []
 
     mutating func begin(handle: Handle, generation: UInt) {
         clear()
@@ -95,12 +86,11 @@ struct MPVFileIdentity {
     mutating func start(handle: Handle, entryID: Int64?) -> Receipt? {
         guard requestedHandle === handle else { return nil }
         if bindingPending { retain(.start(entryID)); return nil }
-        guard stage != .terminal || mayContinueAfterEof else { return nil }
+        guard stage != .terminal else { return nil }
         // Initial loading is request-owned only until an actual file starts.
         pendingPermit?.invalidate()
         pendingPermit = nil
-        guard let entryID, !retired.contains(entryID),
-              entryID == rootID || ranges.contains(where: { $0.contains(entryID) }) else {
+        guard let entryID, entryID == rootID else {
             activeReceipt?.permit.invalidate()
             activeReceipt = nil
             return nil
@@ -109,7 +99,6 @@ struct MPVFileIdentity {
         activeReceipt = Receipt(handle: handle, entryID: entryID,
                                 loadGeneration: requestedGeneration, permit: Permit())
         stage = .pending
-        mayContinueAfterEof = false
         return activeReceipt
     }
 
@@ -122,27 +111,9 @@ struct MPVFileIdentity {
         guard requestedHandle === handle else { return .ignored }
         if bindingPending { retain(.end(payload)); return .ignored }
         guard stage != .terminal, let identity = activeReceipt, identity.entryID == payload.entryID else { return .ignored }
-        if payload.reason == 5 {
-            let count = payload.insertCount
-            let first = payload.insertID
-            let lastAllocated = ranges.map(\.last).max() ?? rootID ?? identity.entryID
-            // Pinned mpv transfers assign ++id_alloc in one loop; the actual
-            // subsequent START selects a member. See END_FILE-evidence.md.
-            guard count > 0, first > max(identity.entryID, lastAllocated),
-                  first <= Int64.max - (Int64(count) - 1), ranges.count < Self.maxRedirects else {
-                return terminate(identity, reason: .error("Invalid or exhausted mpv playlist lineage"))
-            }
-            ranges.append(Range(first: first, last: first + (Int64(count) - 1)))
-            retired.insert(identity.entryID)
-            identity.permit.invalidate()
-            activeReceipt = nil
-            stage = .pending
-            return .redirected
-        }
         switch payload.reason {
-        case 0:
-            mayContinueAfterEof = true
-            return terminate(identity, reason: .eof)
+        case 0: return terminate(identity, reason: .eof)
+        case 5: return terminate(identity, reason: .error("Playlist inputs are not supported by this player"))
         case 2, 3: return terminate(identity, reason: .stopped)
         default: return terminate(identity, reason: .error("mpv playback failed (error \(payload.error))"))
         }
@@ -150,8 +121,8 @@ struct MPVFileIdentity {
 
     private mutating func terminate(_ identity: Receipt, reason: EndReason) -> EndOutcome {
         stage = .terminal
-        // Keep already captured physical progress before normal EOF. Failure
-        // suppresses success, and a later START invalidates either permit.
+        // Preserve already captured physical progress before single-file EOF.
+        // Failure suppresses success; replacement/clear revokes final delivery.
         if case .eof = reason { identity.permit.terminate(allowCapturedMedia: true) }
         else { identity.permit.terminate(allowCapturedMedia: false) }
         return .terminal(identity, reason)
@@ -179,10 +150,11 @@ struct MPVFileIdentity {
         bindingPending = false
         overflowed = false
         stage = .pending
-        mayContinueAfterEof = false
         early = []
-        ranges = []
-        retired = []
+    }
+
+    func ownsTerminal(_ identity: Receipt) -> Bool {
+        stage == .terminal && activeReceipt?.permit === identity.permit && identity.isValid
     }
 
     mutating func invalidate(handle: Handle) -> UInt? {

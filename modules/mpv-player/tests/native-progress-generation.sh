@@ -31,7 +31,7 @@ MODULE
 
 ruby - "$tests_dir/../ios/MPVLayerRenderer.swift" "$test_dir/RendererReceipts.swift" <<'RUBY'
 source = File.read(ARGV[0])
-methods = ['private static func playlistEntryID', 'private static func eventDouble', 'private func captureProgress', 'private func capturePause', 'private func reportPause', 'private func handleQueueOverflow', 'private static func endFileSnapshot', 'private func deliverEndOutcome', 'private func handleFileStart'].map do |name|
+methods = ['private static func playlistEntryID', 'private static func eventDouble', 'private func captureProgress', 'private func capturePause', 'private func reportPause', 'private func handleQueueOverflow', 'private static func endFileSnapshot', 'private func deliverEndOutcome', 'private func stopRejectedInput', 'private func handleFileStart'].map do |name|
   start = source.index(name) or abort "missing production method: #{name}"
   finish = source.index('{', start) or abort 'missing method body'
   depth = 1

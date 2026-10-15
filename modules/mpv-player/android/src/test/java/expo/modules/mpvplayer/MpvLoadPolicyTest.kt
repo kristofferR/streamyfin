@@ -214,125 +214,195 @@ class MpvLoadPolicyTest {
         }
     }
 
-    @Test fun redirectedReadinessBeforeResultFollowsActualNonFirstStartAndNestedLineage() {
-        val policy = policy()
-        val handle = Any()
-        val root = MpvFileKey(handle, 1)
-        val child = MpvFileKey(handle, 12) // Chosen child need not be insert_id=10.
-        val nested = MpvFileKey(handle, 21)
-        var acknowledgements = 0
-        val request = policy.begin(handle) { acknowledgements++ }
-        policy.receive(handle, root, start(), true)
-        policy.receive(handle, root, end(MPVLib.MPV_END_FILE_REASON_REDIRECT, 10, 3), true)
-        policy.receive(handle, child, start(), true)
-        policy.receive(handle, child, end(MPVLib.MPV_END_FILE_REASON_REDIRECT, 20, 2), true)
-        policy.receive(handle, nested, start(), true)
-        policy.receive(handle, nested, loaded, true)
-        val binding = policy.bind(request, root)
-        val ready = binding.receipts.single { it.event == loaded }
-        assertEquals(nested, ready.file)
-        policy.takeLoadCompletion(ready)?.invoke()
-        assertEquals(1, acknowledgements)
-        assertNull(policy.receive(handle, root, loaded, true))
-        // An unrelated END and an unrequested START cannot borrow lineage.
-        assertNull(policy.receive(handle, MpvFileKey(handle, 999), end(4), true))
-        assertNull(policy.receive(handle, MpvFileKey(handle, 999), start(), true))
-        assertNull(policy.receive(handle, MpvFileKey(Any(), 20), start(), true))
-        assertFalse(policy.isCurrent(ready))
-        assertNull(policy.receive(handle, nested, loaded, true))
-        policy.receive(handle, MpvFileKey(handle, 20), start(), true)
-        assertNotNull(policy.receive(handle, MpvFileKey(handle, 20), loaded, true))
-    }
-
-    @Test fun eofCanContinueToAnotherProvenChildButStopQuitAndErrorCannot() {
-        for (reason in listOf(0, 2, 3, 4)) {
-            val policy = policy()
-            val handle = Any()
-            val root = MpvFileKey(handle, 1)
-            policy.bind(policy.begin(handle), root)
-            policy.receive(handle, root, start(), true)
-            policy.receive(handle, root, end(5, 10, 2), true)
-            val first = MpvFileKey(handle, 10)
-            policy.receive(handle, first, start(), true)
-            val ready = policy.receive(handle, first, loaded, true)!!
-            policy.takeLoadCompletion(ready)?.invoke()
-            val terminal = policy.receive(handle, first, end(reason), true)!!
-            assertTrue(policy.takeTerminal(terminal))
-            val next = MpvFileKey(handle, 11)
-            val nextStart = policy.receive(handle, next, start(), true)
-            assertEquals(reason == MPVLib.MPV_END_FILE_REASON_EOF, nextStart != null)
-            if (reason == MPVLib.MPV_END_FILE_REASON_EOF) assertFalse(policy.isCurrent(terminal))
-        }
-    }
-
-    @Test fun shortChildEofBeforePreparationDoesNotLoseTheNextChildAcknowledgement() {
-        val policy = policy()
-        val handle = Any()
-        val root = MpvFileKey(handle, 1)
-        var acknowledgements = 0
-        policy.bind(policy.begin(handle) { acknowledgements++ }, root)
-        policy.receive(handle, root, start(), true)
-        policy.receive(handle, root, end(5, 10, 2), true)
-        val first = MpvFileKey(handle, 10)
-        policy.receive(handle, first, start(), true)
-        val preparing = policy.receive(handle, first, loaded, true)!!
-        policy.receive(handle, first, end(0), true)
-        val second = MpvFileKey(handle, 11)
-        policy.receive(handle, second, start(), true)
-        assertNull(policy.takeLoadCompletion(preparing))
-        val current = policy.receive(handle, second, loaded, true)!!
-        policy.takeLoadCompletion(current)?.invoke()
-        assertEquals(1, acknowledgements)
-    }
-
-    @Test fun malformedRangesAndBoundedLineageExhaustionFailExplicitly() {
-        for ((first, count) in listOf(0L to 1, 10L to 0, 10L to -1, Long.MAX_VALUE to 2)) {
-            val policy = policy()
-            val handle = Any()
-            val root = MpvFileKey(handle, 1)
-            policy.bind(policy.begin(handle), root)
-            val terminal = policy.receive(handle, root, end(5, first, count), true)!!
-            assertTrue(terminal.event is MpvEventSnapshot.Failure)
-            assertTrue(policy.takeTerminal(terminal))
-            assertNull(policy.receive(handle, root, loaded, true))
-        }
-        val policy = policy()
-        val handle = Any()
-        var file = MpvFileKey(handle, 1)
-        policy.bind(policy.begin(handle), file)
-        repeat(64) {
-            val next = MpvFileKey(handle, file.entry + 1)
-            assertNull(policy.receive(handle, file, end(5, next.entry, 1), true))
-            assertNotNull(policy.receive(handle, next, start(), true))
-            file = next
-        }
-        val failure = policy.receive(handle, file, end(5, file.entry + 1, 1), true)!!
-        assertTrue(failure.event is MpvEventSnapshot.Failure)
-        assertTrue(policy.takeTerminal(failure))
-    }
-
-    @Test fun redirectedRangesCannotCrossCancellationOrHandleReuseAndStartEpochsStayImmutable() {
+    @Test fun ordinaryHeldEofReportsOnceAndNativeFalseRearmsReplay() {
         val policy = policy()
         val handle = Any()
         val root = MpvFileKey(handle, 1)
         policy.bind(policy.begin(handle), root)
         policy.receive(handle, root, start(), true)
-        val queued = policy.receive(handle, root, loaded, true)!!
-        policy.receive(handle, root, end(5, 10, 2), true)
-        assertFalse(policy.isCurrent(queued))
-        policy.bind(policy.begin(handle), MpvFileKey(handle, 100))
-        assertNull(policy.receive(handle, MpvFileKey(handle, 10), start(), true))
-        policy.clear()
-        val newHandle = Any()
-        val file = MpvFileKey(newHandle, 10)
-        policy.bind(policy.begin(newHandle), file)
-        assertNull(policy.receive(handle, MpvFileKey(handle, 10), loaded, true))
-        policy.receive(newHandle, file, start(), true)
-        val oldEpoch = policy.receive(newHandle, file, loaded, true)!!
-        policy.receive(newHandle, file, start(), true)
-        assertFalse(policy.isCurrent(oldEpoch))
-        policy.invalidate(newHandle)
-        assertNull(policy.receive(newHandle, file, loaded, true))
+        val ready = policy.receive(handle, root, loaded, true)!!
+        policy.takeLoadCompletion(ready)?.invoke()
+        fun flag(value: Boolean) = policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", value), true)!!
+        val first = flag(true)
+        assertTrue(policy.takePlaybackEnd(first))
+        assertFalse(policy.takePlaybackEnd(first))
+        assertFalse(policy.takePlaybackEnd(flag(true)))
+        assertTrue("held EOF leaves the prepared file usable for replay", policy.isCurrent(ready))
+        flag(false)
+        assertFalse(policy.isCurrent(first))
+        val replay = flag(true)
+        assertTrue(policy.takePlaybackEnd(replay))
+        assertFalse(policy.takePlaybackEnd(replay))
+        val terminal = policy.receive(handle, root, end(0), true)!!
+        assertTrue(policy.takeTerminal(terminal))
+        assertFalse("property and END cannot report the same EOF twice", policy.takePlaybackEnd(terminal))
     }
 
+    @Test fun earlyEofCannotOvertakeFilePreparationAndOnLoad() {
+        for (beforeResult in listOf(false, true)) {
+            val policy = policy()
+            val handle = Any()
+            val root = MpvFileKey(handle, 1)
+            val effects = mutableListOf<String>()
+            val request = policy.begin(handle) { effects.add("onLoad") }
+            if (!beforeResult) policy.bind(request, root)
+            policy.receive(handle, root, start(), true)
+            val prepared = policy.receive(handle, root, loaded, true)
+            val eof = policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", true), true)
+            val receipts = if (beforeResult) policy.bind(request, root).receipts else listOf(prepared!!, eof!!)
+            val ready = receipts.single { it.event == loaded }
+            val ended = receipts.single { it.event is MpvEventSnapshot.Flag }
+            assertFalse(policy.takePlaybackEnd(ended))
+            assertNull(policy.pendingEof())
+            effects.add("subtitles prepared")
+            policy.takeLoadCompletion(ready)?.invoke()
+            val pending = policy.pendingEof()!!
+            if (policy.takePlaybackEnd(pending) && policy.isCurrent(pending)) {
+                assertFalse(Thread.holdsLock(policy))
+                effects.add("onPlaybackEnded")
+            }
+            assertEquals(listOf("subtitles prepared", "onLoad", "onPlaybackEnded"), effects)
+            assertNull(policy.pendingEof())
+        }
+    }
+
+    @Test fun staleQueuedEofCannotSurviveFalseReplacementShutdownErrorOrRedirect() {
+        for (change in listOf("false", "replace", "shutdown", "error", "redirect")) {
+            val policy = policy()
+            val handle = Any()
+            val root = MpvFileKey(handle, 1)
+            policy.bind(policy.begin(handle), root)
+            val ready = policy.receive(handle, root, loaded, true)!!
+            policy.takeLoadCompletion(ready)?.invoke()
+            val queued = policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", true), true)!!
+            when (change) {
+                "false" -> policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", false), true)
+                "replace" -> policy.bind(policy.begin(handle), MpvFileKey(handle, 2))
+                "shutdown" -> policy.invalidate(handle)
+                "error" -> policy.receive(handle, root, end(4), true)
+                "redirect" -> policy.receive(handle, root, end(5, 10, 2), true)
+            }
+            assertFalse("stale EOF after $change", policy.takePlaybackEnd(queued))
+            assertFalse(policy.isCurrent(queued))
+        }
+    }
+
+    @Test fun finalDeliveryStillRejectsAnErrorAfterEofDeduplicationWasTaken() {
+        val policy = policy()
+        val handle = Any()
+        val root = MpvFileKey(handle, 1)
+        policy.bind(policy.begin(handle), root)
+        val ready = policy.receive(handle, root, loaded, true)!!
+        policy.takeLoadCompletion(ready)?.invoke()
+        val eof = policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", true), true)!!
+        assertTrue(policy.takePlaybackEnd(eof))
+        policy.receive(handle, root, end(4), true)
+        assertFalse("the final delegate fence runs after taking the latch", policy.isCurrent(eof))
+    }
+
+    @Test fun nativeLoopSeekAndRestartEventsDoNotInventEofOrSeekAcknowledgements() {
+        val policy = policy()
+        val handle = Any()
+        val root = MpvFileKey(handle, 1)
+        policy.bind(policy.begin(handle), root)
+        val ready = policy.receive(handle, root, loaded, true)!!
+        policy.takeLoadCompletion(ready)?.invoke()
+        // Per-file looping remains mpv's loop-file=inf/no operation. Only
+        // native EOF true/false values drive the baseline completion latch.
+        policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", false), true)
+        policy.receive(handle, root, MpvEventSnapshot.Event(MPVLib.MPV_EVENT_SEEK, 0, null), true)
+        policy.receive(handle, root, MpvEventSnapshot.Event(MPVLib.MPV_EVENT_PLAYBACK_RESTART, 0, null), true)
+        assertNull(policy.pendingEof())
+        val eof = policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", true), true)!!
+        assertTrue(policy.takePlaybackEnd(eof))
+        policy.receive(handle, root, MpvEventSnapshot.Event(MPVLib.MPV_EVENT_SEEK, 0, null), true)
+        policy.receive(handle, root, MpvEventSnapshot.Event(MPVLib.MPV_EVENT_PLAYBACK_RESTART, 0, null), true)
+        assertFalse(policy.takePlaybackEnd(eof))
+        policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", false), true)
+        val replay = policy.receive(handle, root, MpvEventSnapshot.Flag("eof-reached", true), true)!!
+        assertTrue(policy.takePlaybackEnd(replay))
+    }
+
+    @Test fun redirectFailsOnceBeforeAnyChildSuccessIncludingBeforeResultBinding() {
+        for (early in listOf(false, true)) {
+            val policy = policy()
+            val handle = Any()
+            val root = MpvFileKey(handle, 1)
+            val child = MpvFileKey(handle, 10)
+            var acknowledged = false
+            val request = policy.begin(handle) { acknowledged = true }
+            if (!early) policy.bind(request, root)
+            policy.receive(handle, root, start(), true)
+            policy.receive(handle, root, loaded, true) // Preparation may still be queued.
+            val redirected = policy.receive(handle, root, end(5, 10, 3), true)
+            policy.receive(handle, child, start(), true)
+            policy.receive(handle, child, loaded, true)
+            val failure = if (early) policy.bind(request, root).receipts.single() else redirected!!
+            assertTrue(policy.takeTerminal(failure))
+            assertFalse(policy.takeTerminal(failure))
+            val errors = mutableListOf<String>()
+            var hostCompletions = 0
+            failure.event.reportTerminal(onEof = { hostCompletions++ }, onError = { errors.add(it) })
+            assertEquals(listOf("Playlist inputs are not supported by this player"), errors)
+            assertFalse(acknowledged)
+            assertNull(policy.takeLoadCompletion(failure))
+            // Deliver the child's EOF all the way to the host BEFORE the next
+            // child's START. There is no earlier START to retire this receipt.
+            val childEof = policy.receive(handle, child, end(0), true)
+            childEof?.let { if (policy.takeTerminal(it)) it.event.reportTerminal({ hostCompletions++ }, { errors.add(it) }) }
+            assertEquals(0, hostCompletions)
+            assertNull(policy.receive(handle, MpvFileKey(handle, 11), start(), true))
+            assertNull(policy.receive(handle, child, MpvEventSnapshot.Decimal("time-pos", 100.0), false))
+            assertEquals(1, errors.size)
+        }
+    }
+
+    @Test fun rejectionUsesOnlyTheAcceptedEndReason() {
+        for ((first, count) in listOf(10L to 3, 0L to 0, Long.MAX_VALUE to 2)) {
+            val policy = policy()
+            val handle = Any()
+            val root = MpvFileKey(handle, 1)
+            policy.bind(policy.begin(handle), root)
+            val failure = policy.receive(handle, root, end(5, first, count), true)!!
+            assertEquals(MpvEventSnapshot.Failure("Playlist inputs are not supported by this player"), failure.event)
+            assertTrue(policy.ownsTerminal(failure))
+        }
+        // Ordinary readiness without a playlist END remains valid. The policy
+        // accepts native identities and has no URL/suffix input to classify.
+        val policy = policy()
+        val handle = Any()
+        val root = MpvFileKey(handle, 1)
+        policy.bind(policy.begin(handle), root)
+        assertNotNull(policy.receive(handle, root, loaded, true))
+    }
+
+    @Test fun rejectedInputStopCannotCrossReplacementOrHandleReuse() {
+        val policy = policy()
+        val handle = Any()
+        val root = MpvFileKey(handle, 1)
+        policy.bind(policy.begin(handle), root)
+        val failure = policy.receive(handle, root, end(5, 10, 2), true)!!
+        assertTrue(policy.ownsTerminal(failure))
+        policy.bind(policy.begin(handle), MpvFileKey(handle, 20))
+        assertFalse(policy.ownsTerminal(failure))
+        policy.clear()
+        val newHandle = Any()
+        policy.bind(policy.begin(newHandle), MpvFileKey(newHandle, 1))
+        assertFalse(policy.ownsTerminal(failure))
+        assertNull(policy.receive(handle, root, loaded, true))
+    }
+
+    @Test fun terminalOutcomesNeverReopenOnUnexpectedStart() {
+        for (reason in listOf(0, 2, 3, 4, 5)) {
+            val policy = policy()
+            val handle = Any()
+            val root = MpvFileKey(handle, 1)
+            policy.bind(policy.begin(handle), root)
+            val terminal = policy.receive(handle, root, end(reason), true)!!
+            assertTrue(policy.takeTerminal(terminal))
+            assertNull(policy.receive(handle, root, start(), true))
+            assertNull(policy.receive(handle, MpvFileKey(handle, 10), start(), true))
+            assertNull(policy.receive(handle, root, loaded, true))
+        }
+    }
 }
