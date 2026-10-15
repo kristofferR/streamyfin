@@ -2,6 +2,12 @@ name: Spatial audio validation
 
 on:
   workflow_dispatch:
+    inputs:
+      resume_from:
+        description: First archive to run (skip only archives already verified for these exact candidates)
+        type: choice
+        default: spatial-ios
+        options: [spatial-ios, spatial-tvos, progress-ios, progress-tvos]
 
 permissions:
   contents: read
@@ -14,13 +20,17 @@ jobs:
   validate:
     if: github.repository == 'kristofferR/streamyfin'
     runs-on: macos-26
-    timeout-minutes: 150
+    # Prior archives took about 33 min iOS / 26 min tvOS. Four cold archives,
+    # installs and checks need more than the original 150-minute budget.
+    timeout-minutes: 210
     env:
       CI: 'true'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      SPATIAL_REF: 5380719d87f2b3fe4ef434e5b5c9d417fcab8a48
-      PROGRESS_REF: 56c39e439a4529de13a38434bb76fd149ce34f14
+      SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
+      SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
+      PROGRESS_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
+      PROGRESS_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -29,10 +39,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify candidate differs only by this workflow
+      - name: Verify exact spatial candidate and workflow-only delta
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse "$SPATIAL_REF^{tree}")" = "$SPATIAL_TREE"
           git diff --exit-code "$SPATIAL_REF" HEAD -- . ':!.github/workflows/build-apps.yml'
           git merge-base --is-ancestor "$SPATIAL_REF" HEAD
 
@@ -46,6 +57,38 @@ jobs:
         with:
           xcode-version: '26.6'
 
+      - name: Cache dependency downloads only
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.4.2-${{ env.SPATIAL_REF }}-${{ env.PROGRESS_REF }}-${{ hashFiles('bun.lock') }}
+
+      - name: Write unsigned archive helper
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/archive-unsigned.sh" <<'SH'
+          set -euo pipefail
+          source_dir="$(cd "$1" && pwd)"
+          export EXPO_TV="$2"
+          cd "$source_dir"
+          trap 'rm -rf "$source_dir/ios" "$source_dir/build" "$HOME/Library/Developer/Xcode/DerivedData"' EXIT
+          bun run expo prebuild --clean --no-install
+          git diff --exit-code -- bun.lock package.json
+          (
+            cd ios
+            pod install
+            cp Podfile.lock "$RUNNER_TEMP/validated-pods.lock"
+            pod install --deployment
+            cmp Podfile.lock "$RUNNER_TEMP/validated-pods.lock"
+          )
+          if [ "$EXPO_TV" = 0 ]; then
+            bun run ios:unsigned-build --no-install --skip-credentials --verbose
+          else
+            bun run ios:unsigned-build:tv --no-install --skip-credentials --verbose
+          fi
+          git diff --exit-code -- bun.lock package.json
+          SH
+
       - name: Native track-selection regression
         shell: bash
         run: |
@@ -55,38 +98,9 @@ jobs:
           trap 'git show "$SPATIAL_REF:$source_path" > "$source_path"' EXIT
           git show "$SPATIAL_REF^:$source_path" > "$source_path"
           if bash modules/mpv-player/tests/native-audio-track-selection.sh; then
-            echo 'Regression test unexpectedly passed before the fix'
+            echo 'Regression test unexpectedly passed before the speed-state fix'
             exit 1
           fi
-
-      - name: Checkout progress candidate for focused tests
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ env.PROGRESS_REF }}
-          path: progress-candidate
-          fetch-depth: 2
-          persist-credentials: false
-
-      - name: Progress candidate quality and event-order tests
-        working-directory: progress-candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          bun install --frozen-lockfile
-          bun run typecheck
-          bun run check
-          bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts utils/nativePlayer/applyProgressTick.test.ts utils/nativePlayer/syncPlay.test.ts utils/nativePlayer/resolveTeardownReport.test.ts
-          source_path=utils/nativePlayer/applyLoadEvent.ts
-          trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"' EXIT
-          git show "$PROGRESS_REF^:$source_path" > "$source_path"
-          if bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts; then
-            echo 'Regression test unexpectedly passed before the fix'
-            exit 1
-          fi
-
-      - name: Remove progress checkout
-        if: always()
-        run: rm -rf progress-candidate
 
       - name: Spatial candidate quality and track-mapping tests
         shell: bash
@@ -98,41 +112,62 @@ jobs:
           bun run test:unit --runInBand utils/jellyfin/subtitleUtils.test.ts utils/nativePlayer/resolveTrackIndexes.test.ts
           git diff --exit-code -- bun.lock package.json
 
-      - name: Generate iOS project and freeze resolved pods
-        env:
-          EXPO_TV: '0'
+      - name: Archive exact spatial candidate for iOS unsigned
+        if: inputs.resume_from == 'spatial-ios'
+        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE" 0
+
+      - name: Archive exact spatial candidate for tvOS unsigned
+        if: inputs.resume_from == 'spatial-ios' || inputs.resume_from == 'spatial-tvos'
+        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE" 1
+
+      - name: Remove spatial dependencies before progress candidate
+        run: rm -rf node_modules
+
+      - name: Checkout exact progress candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.PROGRESS_REF }}
+          path: progress-candidate
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify progress candidate and run native generation scenarios
+        working-directory: progress-candidate
         shell: bash
         run: |
           set -euo pipefail
-          bun run expo prebuild --clean --no-install
-          cd ios
-          pod install
-          pod install --deployment
+          test "$(git rev-parse HEAD)" = "$PROGRESS_REF"
+          test "$(git rev-parse HEAD^{tree})" = "$PROGRESS_TREE"
+          bash modules/mpv-player/tests/native-progress-generation.sh
 
-      - name: Archive iOS unsigned
-        env:
-          EXPO_TV: '0'
-        run: bun run ios:unsigned-build --no-install --skip-credentials --verbose
-
-      - name: Remove iOS build output before tvOS
-        run: rm -rf ios build "$HOME/Library/Developer/Xcode/DerivedData"
-
-      - name: Generate tvOS project and freeze resolved pods
-        env:
-          EXPO_TV: '1'
+      - name: Progress candidate quality and event-order tests
+        working-directory: progress-candidate
         shell: bash
         run: |
           set -euo pipefail
-          bun run expo prebuild --clean --no-install
-          cd ios
-          pod install
-          pod install --deployment
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run check
+          bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts utils/nativePlayer/applyProgressTick.test.ts utils/nativePlayer/syncPlay.test.ts utils/nativePlayer/resolveTeardownReport.test.ts
+          git diff --exit-code -- bun.lock package.json
+          source_path=utils/nativePlayer/applyLoadEvent.ts
+          trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"' EXIT
+          git show "$PROGRESS_REF^:$source_path" > "$source_path"
+          # The previous candidate lacked canonical hostname matching.
+          git show "$PROGRESS_REF^:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts
+          trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"; git show "$PROGRESS_REF:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts' EXIT
+          if bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts; then
+            echo 'Regression test unexpectedly passed before hostname normalization'
+            exit 1
+          fi
 
-      - name: Archive tvOS unsigned
-        env:
-          EXPO_TV: '1'
-        run: bun run ios:unsigned-build:tv --no-install --skip-credentials --verbose
+      - name: Archive exact progress candidate for iOS unsigned
+        if: inputs.resume_from != 'progress-tvos'
+        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE/progress-candidate" 0
+
+      - name: Archive exact progress candidate for tvOS unsigned
+        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE/progress-candidate" 1
 
       - name: Remove all build output
         if: always()
-        run: rm -rf ios build "$HOME/Library/Developer/Xcode/DerivedData"
+        run: rm -rf ios build progress-candidate "$HOME/Library/Developer/Xcode/DerivedData"
