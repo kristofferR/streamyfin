@@ -32,8 +32,8 @@ jobs:
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: a25fc25073da49503efbfd746d7ef4899b9513a1
-      PROGRESS_TREE: 57ddc6a775b1045bb429728127bd726f26debbbf
+      PROGRESS_REF: a1ce748fb9336be8f98363a8388ae5be12155fc3
+      PROGRESS_TREE: 04c4862ba69548079fd5ba92028b1db792b9e70f
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
     steps:
       - name: Checkout audited validation branch
@@ -296,8 +296,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       BASELINE_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
       BASELINE_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
-      CANDIDATE_REF: a25fc25073da49503efbfd746d7ef4899b9513a1
-      CANDIDATE_TREE: 57ddc6a775b1045bb429728127bd726f26debbbf
+      CANDIDATE_REF: a1ce748fb9336be8f98363a8388ae5be12155fc3
+      CANDIDATE_TREE: 04c4862ba69548079fd5ba92028b1db792b9e70f
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -677,6 +677,7 @@ jobs:
           errors = []
           report = { source: config.fetch('source'), tree: config.fetch('tree'), app_abis: abis,
                      binding_selection: config.fetch('appBindingSelection'), modules: {}, runtimes: {},
+                     cpp_requirement_scope: 'Selected/released runtime exports plus std, new/delete, CXXABI and unwind families; platform @LIBC and unrelated module-to-module imports excluded.',
                      errors: errors, scope: 'Actual app native merge/strip and C++ dynamic symbol/version coverage; no APK, device execution or general ABI-behavior proof.' }
           requirements = ["abi\tmodule\tcpp_imports\tstrong\tweak\tmissing_strong\tmissing_weak\trequirements_sha256"]
           begin
@@ -941,8 +942,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: a25fc25073da49503efbfd746d7ef4899b9513a1
-      PROGRESS_TREE: 57ddc6a775b1045bb429728127bd726f26debbbf
+      PROGRESS_REF: a1ce748fb9336be8f98363a8388ae5be12155fc3
+      PROGRESS_TREE: 04c4862ba69548079fd5ba92028b1db792b9e70f
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
