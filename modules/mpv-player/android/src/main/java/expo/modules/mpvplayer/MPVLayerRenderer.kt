@@ -131,6 +131,7 @@ class MPVLayerRenderer(
     private var cachedDuration: Double = 0.0
     private var cachedCacheSeconds: Double = 0.0
     private var metadataRevision = MpvFileMetadata.Revision()
+    private var progressObservation: MpvClockReport? = null
     private var _isPaused: Boolean = true
     private var _isLoading: Boolean = false
     private var loadingRevision = 0L
@@ -433,6 +434,7 @@ class MPVLayerRenderer(
         cachedPosition = 0.0
         cachedDuration = 0.0
         cachedCacheSeconds = 0.0
+        progressObservation = null
 
         if (m == null) {
             activeToken?.let(MpvOwnership::release)
@@ -701,6 +703,7 @@ class MPVLayerRenderer(
         cachedPosition = startPosition
         cachedDuration = 0.0
         cachedCacheSeconds = 0.0
+        progressObservation = null
         lastProgressUpdateTime = 0
         delegate?.onLoadingChanged(true)
         if (!loadPolicy.isCurrent(request)) return
@@ -1298,8 +1301,16 @@ class MPVLayerRenderer(
         when (property) {
             "track-list/count" -> if (value > 0) notify(receipt) { it.onTracksReady() }
             "chapter-list/count" -> {
-                val chapters = getChapters()
-                notify(receipt) { it.onChaptersChanged(chapters) }
+                val handle = receipt.request.handle
+                nativeWorker?.execute {
+                    val chapters = captureMpvChapters(
+                        { isCurrent(receipt) },
+                        { handle.getPropertyInt("chapter-list/count") },
+                        { handle.getPropertyString("chapter-list/$it/title") },
+                        { handle.getPropertyDouble("chapter-list/$it/time") },
+                    ) ?: return@execute
+                    mainHandler.post { notify(receipt) { it.onChaptersChanged(chapters) } }
+                }
             }
             "video-params/w" -> if (value > 0 && value.toInt() != _videoWidth) {
                 _videoWidth = value.toInt()
@@ -1385,6 +1396,7 @@ class MPVLayerRenderer(
             }
             "time-pos" -> {
                 cachedPosition = value
+                progressObservation = MpvClockReport(value, cachedDuration, cachedCacheSeconds)
                 val now = System.currentTimeMillis()
                 if (_isSeeking || now - lastProgressUpdateTime >= 1000) {
                     lastProgressUpdateTime = now
@@ -1405,6 +1417,7 @@ class MPVLayerRenderer(
                 cachedPosition = loadStartPosition
                 cachedDuration = 0.0
                 cachedCacheSeconds = 0.0
+                progressObservation = null
                 lastProgressUpdateTime = 0
                 isReadyToSeek = false
                 _isLoading = true
@@ -1489,14 +1502,20 @@ class MPVLayerRenderer(
                 val requestId = if (_isSeeking) activeSeekReportRequestId else null
                 if (requestId != null && requestId != event.seekRequestId) return
                 val loadingAtReceipt = loadingRevision
+                val progressAtReceipt = progressObservation
+                val metadataAtReceipt = metadataRevision
                 val currentClock = {
                     isCurrent(receipt) && loadPolicy.isCurrentClock(receipt) &&
                         event.seekGeneration == seekReportGeneration && event.seekRequestId == seekReportRequestId
                 }
                 nativeWorker?.execute {
-                    val clock = captureMpvClockReport(currentClock, handle::getPropertyDouble) ?: return@execute
+                    val captured = captureMpvClockReport(currentClock, handle::getPropertyDouble) ?: return@execute
                     mainHandler.post {
                         if (!currentClock()) return@post
+                        val clock = captured.reconcileProgress(progressAtReceipt, progressObservation).copy(
+                            duration = if (metadataRevision.duration == metadataAtReceipt.duration) captured.duration else cachedDuration,
+                            cache = if (metadataRevision.cache == metadataAtReceipt.cache) captured.cache else cachedCacheSeconds,
+                        )
                         clock.position?.let { cachedPosition = it }
                         _isSeeking = false
                         activeSeekReportRequestId = null

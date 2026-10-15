@@ -24,8 +24,10 @@ exact request identity. Only accepted FILE_LOADED plus completed subtitle/track
 preparation can acknowledge it, once. Terminal, stopped or different-handle
 requests do not transfer success.
 
-FILE_LOADED metadata and PLAYBACK_RESTART clock reads run on the handle's worker,
+FILE_LOADED metadata, chapters and PLAYBACK_RESTART clock reads run on the handle's worker,
 with ownership checked around native reads and final main delivery. Later native
 metadata properties win over an outstanding one-shot read. Observed SEEK/RESTART
 revokes an older queued restart clock; this is not a newest-host-seek acknowledgement
 and does not alter the documented baseline rapid-seek/EOF limitations.
+Queued restart delivery also preserves a newer delivered native position and
+metadata observations rather than overwriting them with an older worker reply.
