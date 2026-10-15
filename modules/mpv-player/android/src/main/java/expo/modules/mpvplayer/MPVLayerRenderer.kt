@@ -1311,22 +1311,12 @@ class MPVLayerRenderer(
 
     private fun handleFlag(receipt: MpvReceipt, property: String, value: Boolean) {
         when (property) {
-            "pause" -> if (value != _isPaused) {
-                _isPaused = value
-                // Read the physical stopped frame on the serialized owner, never
-                // while holding the policy lock. Delivery uses this snapshot.
-                val report = MpvPauseReport(
-                    paused = value,
-                    position = if (value) receipt.request.handle.getPropertyDouble("time-pos") else null,
-                    duration = cachedDuration,
-                    cacheSeconds = cachedCacheSeconds,
-                )
-                report.deliver(
-                    onProgress = { position, duration, cache ->
-                        notify(receipt) { it.onPositionChanged(position, duration, cache) }
-                    },
-                    onPause = { paused -> notify(receipt) { it.onPauseChanged(paused) } },
-                )
+            "pause" -> {
+                val capture = loadPolicy.capturePause(receipt) ?: return
+                loadExecutor.execute {
+                    val report = capturePauseReport(capture, value) ?: return@execute
+                    mainHandler.post { reportPause(capture, report) }
+                }
             }
             "paused-for-cache" -> {
                 loadingRevision++
@@ -1338,6 +1328,32 @@ class MPVLayerRenderer(
             "eof-reached" -> if (value) notifyPlaybackEnd(receipt)
             // Native false resets the policy's deduplication at receipt time.
         }
+    }
+
+    private fun isCurrent(capture: MpvLoadPolicy.PauseCapture<MPVLib>): Boolean =
+        isCurrent(capture.receipt) && loadPolicy.isCurrent(capture)
+
+    private fun capturePauseReport(capture: MpvLoadPolicy.PauseCapture<MPVLib>, expectedPaused: Boolean?): MpvPauseReport? {
+        val handle = capture.receipt.request.handle
+        return captureMpvPauseReport(
+            expectedPaused = expectedPaused,
+            isCurrent = { isCurrent(capture) },
+            readPaused = { handle.getPropertyBoolean("pause") },
+            readPosition = { handle.getPropertyDouble("time-pos") },
+            readDuration = { handle.getPropertyDouble("duration") },
+            readCache = { handle.getPropertyDouble("demuxer-cache-duration") },
+        )
+    }
+
+    private fun reportPause(capture: MpvLoadPolicy.PauseCapture<MPVLib>, report: MpvPauseReport) {
+        if (!isCurrent(capture) || report.paused == _isPaused) return
+        _isPaused = report.paused
+        report.deliver(
+            onProgress = { position, duration, cache ->
+                if (isCurrent(capture)) delegate?.onPositionChanged(position, duration, cache)
+            },
+            onPause = { paused -> if (isCurrent(capture)) delegate?.onPauseChanged(paused) },
+        )
     }
 
     private fun reportProgress(receipt: MpvReceipt) {
@@ -1393,8 +1409,6 @@ class MPVLayerRenderer(
                 if (!isCurrent(receipt)) return
                 notifyVideoDimensionsIfReady(receipt)
                 if (!isCurrent(receipt)) return
-                handle.getPropertyBoolean("pause")?.let { handleFlag(receipt, "pause", it) }
-                if (!isCurrent(receipt)) return
                 val loadingAtReceipt = loadingRevision
                 loadExecutor.execute {
                     if (!isCurrent(receipt)) return@execute
@@ -1402,7 +1416,11 @@ class MPVLayerRenderer(
                         subtitles.forEach { handle.command(arrayOf("sub-add", it, "auto")) }
                         audioId?.let { if (it > 0) handle.setPropertyInt("aid", it) }
                         selectSubtitle(handle, subtitleId)
+                        val pauseCapture = loadPolicy.capturePause(receipt)
+                        val pauseReport = pauseCapture?.let { capturePauseReport(it, null) }
                         mainHandler.post {
+                            if (!isCurrent(receipt)) return@post
+                            if (pauseCapture != null && pauseReport != null) reportPause(pauseCapture, pauseReport)
                             if (!isCurrent(receipt)) return@post
                             // A returned entry ID alone is not readiness. JS may
                             // now sub-add/select: all initial track work is done.
@@ -1420,7 +1438,7 @@ class MPVLayerRenderer(
                                 notify(receipt) { it.onLoadingChanged(false) }
                             }
                             if (!isCurrent(receipt)) return@post
-                            loadPolicy.pendingEof()?.let(::notifyPlaybackEnd)
+                            loadPolicy.pendingEof()?.let(::deliverReceipt)
                         }
                     } catch (error: Exception) {
                         mainHandler.post { notify(receipt) { it.onError("Could not prepare the loaded mpv file") } }

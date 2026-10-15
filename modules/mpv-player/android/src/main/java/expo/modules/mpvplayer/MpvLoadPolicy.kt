@@ -6,7 +6,8 @@ internal data class MpvFileKey(val source: Any, val entry: Long)
 /** Serializes command-bound requests and immutable native lifecycle receipts. */
 internal class MpvLoadPolicy<H : Any> {
     class Request<H>(val handle: H)
-    data class Receipt<H>(val request: Request<H>, val file: MpvFileKey, val event: MpvEventSnapshot, val epoch: Long)
+    data class Receipt<H>(val request: Request<H>, val file: MpvFileKey, val event: MpvEventSnapshot, val epoch: Long, val pauseRevision: Long)
+    data class PauseCapture<H>(val receipt: Receipt<H>, val revision: Long)
     data class Binding<H>(val accepted: Boolean, val receipts: List<Receipt<H>>)
     enum class Stage { PENDING, PREPARED, TERMINAL }
     private data class Early(val file: MpvFileKey, val event: MpvEventSnapshot)
@@ -25,6 +26,7 @@ internal class MpvLoadPolicy<H : Any> {
     private var terminalDelivered = false
     private var latestEof: Receipt<H>? = null
     private var eofDelivered = false
+    private var pauseRevision = 0L
     private var bindingPending = false
     private var overflowed = false
     private var invalidated = false
@@ -72,6 +74,17 @@ internal class MpvLoadPolicy<H : Any> {
     private fun accept(request: Request<H>, file: MpvFileKey, event: MpvEventSnapshot): Receipt<H>? {
         val root = this.root ?: return null
         if (invalidated) return null
+        if (terminal != null) {
+            // An ordinary END may await preparation. A later explicit failure
+            // or cancellation still cancels it; no further START can revive it.
+            if (stage != Stage.TERMINAL && event is MpvEventSnapshot.EndFile &&
+                event.reason != MPVLib.MPV_END_FILE_REASON_EOF && this.file == file) {
+                val receipt = Receipt(request, file, event, epoch, pauseRevision)
+                return terminate(if (event.reason == MPVLib.MPV_END_FILE_REASON_REDIRECT)
+                    receipt.copy(event = MpvEventSnapshot.Failure("Playlist inputs are not supported by this player")) else receipt)
+            }
+            return null
+        }
         if (event is MpvEventSnapshot.Event && event.id == MPVLib.MPV_EVENT_START_FILE) {
             if (stage == Stage.TERMINAL) return null
             if (file != root) {
@@ -87,7 +100,8 @@ internal class MpvLoadPolicy<H : Any> {
             eofDelivered = false
         }
         if (stage == Stage.TERMINAL || this.file != file) return null
-        val receipt = Receipt(request, file, event, epoch)
+        if (event is MpvEventSnapshot.Flag && event.property == "pause") pauseRevision++
+        val receipt = Receipt(request, file, event, epoch, pauseRevision)
         if (event is MpvEventSnapshot.Flag && event.property == "eof-reached") {
             latestEof = receipt
             // Baseline replay semantics: a native false rearms completion.
@@ -97,6 +111,13 @@ internal class MpvLoadPolicy<H : Any> {
         if (event is MpvEventSnapshot.EndFile) {
             if (event.reason == MPVLib.MPV_END_FILE_REASON_REDIRECT) {
                 return terminate(receipt.copy(event = MpvEventSnapshot.Failure("Playlist inputs are not supported by this player")))
+            }
+            if (event.reason == MPVLib.MPV_END_FILE_REASON_EOF) {
+                // Keep an already accepted FILE_LOADED and its async track
+                // preparation alive until onLoad has run, then deliver EOF.
+                terminal = receipt
+                latestEof = null
+                return receipt
             }
             return terminate(receipt)
         }
@@ -120,11 +141,16 @@ internal class MpvLoadPolicy<H : Any> {
         if (!isCurrent(receipt) || stage != Stage.PENDING ||
             receipt.event !is MpvEventSnapshot.Event || receipt.event.id != MPVLib.MPV_EVENT_FILE_LOADED) return null
         stage = Stage.PREPARED
-        return loadCompletion.also { loadCompletion = null }
+        val completion = loadCompletion
+        loadCompletion = null
+        return completion?.let { { if (isCurrent(receipt)) it() } }
     }
 
     @Synchronized fun takeTerminal(receipt: Receipt<H>): Boolean {
         if (!isCurrent(receipt) || terminal !== receipt || terminalDelivered) return false
+        if (receipt.event is MpvEventSnapshot.EndFile && receipt.event.reason == MPVLib.MPV_END_FILE_REASON_EOF &&
+            stage != Stage.PREPARED) return false
+        stage = Stage.TERMINAL
         terminalDelivered = true
         return true
     }
@@ -137,9 +163,11 @@ internal class MpvLoadPolicy<H : Any> {
     @Synchronized fun owns(request: Request<H>): Boolean = this.request === request
 
     /** Early EOF waits for FILE_LOADED preparation and onLoad delivery. */
-    @Synchronized fun pendingEof(): Receipt<H>? = latestEof?.takeIf {
-        val event = it.event
-        stage == Stage.PREPARED && event is MpvEventSnapshot.Flag && event.value && !eofDelivered
+    @Synchronized fun pendingEof(): Receipt<H>? {
+        if (stage != Stage.PREPARED) return null
+        terminal?.takeIf { !terminalDelivered && it.event is MpvEventSnapshot.EndFile &&
+            it.event.reason == MPVLib.MPV_END_FILE_REASON_EOF }?.let { return it }
+        return latestEof?.takeIf { it.event is MpvEventSnapshot.Flag && it.event.value && !eofDelivered }
     }
 
     @Synchronized fun takePlaybackEnd(receipt: Receipt<H>): Boolean {
@@ -147,7 +175,7 @@ internal class MpvLoadPolicy<H : Any> {
         val event = receipt.event
         val heldEof = stage == Stage.PREPARED && latestEof === receipt &&
             event is MpvEventSnapshot.Flag && event.property == "eof-reached" && event.value
-        val endedEof = terminal === receipt && event is MpvEventSnapshot.EndFile &&
+        val endedEof = stage == Stage.TERMINAL && terminalDelivered && terminal === receipt && event is MpvEventSnapshot.EndFile &&
             event.reason == MPVLib.MPV_END_FILE_REASON_EOF
         if (!heldEof && !endedEof) return false
         eofDelivered = true
@@ -157,9 +185,15 @@ internal class MpvLoadPolicy<H : Any> {
     @Synchronized fun isCurrent(receipt: Receipt<H>): Boolean =
         request === receipt.request && !invalidated && file == receipt.file && epoch == receipt.epoch &&
             (receipt.event !is MpvEventSnapshot.Flag || receipt.event.property != "eof-reached" || latestEof === receipt) &&
-            (stage != Stage.TERMINAL || terminal === receipt ||
-                (terminal?.event.let { it is MpvEventSnapshot.EndFile && it.reason == MPVLib.MPV_END_FILE_REASON_EOF } &&
-                    !terminalDelivered && receipt.event is MpvEventSnapshot.Decimal))
+            (receipt.event !is MpvEventSnapshot.Flag || receipt.event.property != "pause" || receipt.pauseRevision == pauseRevision) &&
+            (stage != Stage.TERMINAL || terminal === receipt)
+
+    /** A later native pause observation revokes an outstanding clock read. */
+    @Synchronized fun capturePause(receipt: Receipt<H>): PauseCapture<H>? =
+        if (isCurrent(receipt)) PauseCapture(receipt, pauseRevision) else null
+
+    @Synchronized fun isCurrent(capture: PauseCapture<H>): Boolean =
+        isCurrent(capture.receipt) && capture.revision == pauseRevision
 
     @Synchronized fun invalidate(handle: H): Request<H>? {
         val current = request?.takeIf { it.handle === handle && !invalidated } ?: return null

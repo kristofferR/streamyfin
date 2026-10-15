@@ -2,6 +2,9 @@ package expo.modules.mpvplayer
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MpvLoadPolicyTest {
     private fun policy() = MpvLoadPolicy<Any>()
@@ -185,11 +188,101 @@ class MpvLoadPolicyTest {
         val handle = Any()
         val file = MpvFileKey(handle, 1)
         policy.bind(policy.begin(handle), file)
+        policy.takeLoadCompletion(policy.receive(handle, file, loaded, true)!!)?.invoke()
         val progress = policy.receive(handle, file, MpvEventSnapshot.Decimal("time-pos", 1799.9), false)!!
         val terminal = policy.receive(handle, file, end(0), true)!!
         assertTrue(policy.isCurrent(progress))
         assertTrue(policy.takeTerminal(terminal))
         assertFalse(policy.isCurrent(progress))
+    }
+
+    @Test fun ordinaryEndWaitsForOutstandingPreparationAndOnLoadIncludingBeforeBinding() {
+        for (beforeResult in listOf(false, true)) {
+            val policy = policy()
+            val handle = Any()
+            val file = MpvFileKey(handle, 1)
+            val effects = mutableListOf<String>()
+            val request = policy.begin(handle) { effects.add("onLoad") }
+            if (!beforeResult) policy.bind(request, file)
+            val queued = policy.receive(handle, file, loaded, true)
+            val earlyEnd = if (beforeResult) policy.receive(handle, file, end(0), true) else null
+            val retained = if (beforeResult) policy.bind(request, file).receipts else emptyList()
+            val ready = queued ?: retained.single { it.event == loaded }
+            val worker = Executors.newSingleThreadExecutor()
+            val preparing = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            try {
+                val preparation = worker.submit {
+                    assertTrue(policy.isCurrent(ready))
+                    preparing.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    assertTrue(policy.isCurrent(ready))
+                    effects.add("subtitles prepared")
+                }
+                assertTrue(preparing.await(5, TimeUnit.SECONDS))
+                val terminal = earlyEnd ?: if (beforeResult) retained.single { it.event is MpvEventSnapshot.EndFile }
+                    else policy.receive(handle, file, end(0), true)!!
+                assertFalse(policy.takeTerminal(terminal))
+                assertFalse(policy.takePlaybackEnd(terminal))
+                assertNull(policy.pendingEof())
+                release.countDown()
+                preparation.get(5, TimeUnit.SECONDS)
+                policy.takeLoadCompletion(ready)?.invoke()
+                val pending = policy.pendingEof()!!
+                assertTrue(policy.takeTerminal(pending))
+                if (policy.takePlaybackEnd(pending)) effects.add("onPlaybackEnded")
+                assertEquals(listOf("subtitles prepared", "onLoad", "onPlaybackEnded"), effects)
+                assertFalse(policy.takeTerminal(pending))
+                assertFalse(policy.takePlaybackEnd(pending))
+            } finally {
+                release.countDown()
+                worker.shutdownNow()
+            }
+        }
+    }
+
+    @Test fun deferredOrdinaryEndCannotReviveCancelledPreparationOrCrossOnLoadReplacement() {
+        for (change in listOf("error", "redirect", "stop", "quit", "replacement", "shutdown", "onLoad replacement")) {
+            val policy = policy()
+            val handle = Any()
+            val file = MpvFileKey(handle, 1)
+            var loads = 0
+            val request = policy.begin(handle) {
+                loads++
+                if (change == "onLoad replacement") policy.begin(handle)
+            }
+            policy.bind(request, file)
+            val ready = policy.receive(handle, file, loaded, true)!!
+            val eof = policy.receive(handle, file, end(0), true)!!
+            when (change) {
+                "error" -> policy.receive(handle, file, end(4), true)
+                "redirect" -> policy.receive(handle, file, end(5), true)
+                "stop" -> policy.receive(handle, file, end(2), true)
+                "quit" -> policy.receive(handle, file, end(3), true)
+                "replacement" -> policy.begin(handle)
+                "shutdown" -> policy.invalidate(handle)
+            }
+            policy.takeLoadCompletion(ready)?.invoke()
+            assertEquals(if (change == "onLoad replacement") 1 else 0, loads)
+            assertNull(policy.pendingEof())
+            assertFalse(policy.takeTerminal(eof))
+            assertFalse(policy.takePlaybackEnd(eof))
+        }
+    }
+
+    @Test fun cancellationAfterTakingLoadCompletionStillPreventsItsFinalInvocation() {
+        val policy = policy()
+        val handle = Any()
+        val file = MpvFileKey(handle, 1)
+        var loads = 0
+        policy.bind(policy.begin(handle) { loads++ }, file)
+        val ready = policy.receive(handle, file, loaded, true)!!
+        policy.receive(handle, file, end(0), true)
+        val completion = policy.takeLoadCompletion(ready)!!
+        policy.receive(handle, file, end(4), true)
+        completion()
+        assertEquals(0, loads)
+        assertNull(policy.pendingEof())
     }
 
     @Test fun errorBeforeReadinessIsTerminalOnceAndCannotAcknowledgeSuccess() {
@@ -398,6 +491,7 @@ class MpvLoadPolicyTest {
             val handle = Any()
             val root = MpvFileKey(handle, 1)
             policy.bind(policy.begin(handle), root)
+            policy.takeLoadCompletion(policy.receive(handle, root, loaded, true)!!)?.invoke()
             val terminal = policy.receive(handle, root, end(reason), true)!!
             assertTrue(policy.takeTerminal(terminal))
             assertNull(policy.receive(handle, root, start(), true))

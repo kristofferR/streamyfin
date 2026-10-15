@@ -18,3 +18,25 @@ internal data class MpvPauseReport(
         onPause(paused)
     }
 }
+
+/** Runs on the existing native worker; all getters are outside policy locks. */
+internal fun captureMpvPauseReport(
+    expectedPaused: Boolean?,
+    isCurrent: () -> Boolean,
+    readPaused: () -> Boolean?,
+    readPosition: () -> Double?,
+    readDuration: () -> Double?,
+    readCache: () -> Double?,
+): MpvPauseReport? {
+    if (!isCurrent()) return null
+    val paused = readPaused() ?: return null
+    if (!isCurrent() || (expectedPaused != null && paused != expectedPaused)) return null
+    val position = if (paused) readPosition() else null
+    if (!isCurrent()) return null
+    val duration = readDuration() ?: 0.0
+    if (!isCurrent()) return null
+    val cache = readCache() ?: 0.0
+    // Never label a newer running clock with a queued older pause observation.
+    if (!isCurrent() || readPaused() != paused || !isCurrent()) return null
+    return MpvPauseReport(paused, position, duration, cache)
+}
