@@ -397,10 +397,14 @@ jobs:
           done
           test "$("$cmake_bin/cmake" --version | head -n 1)" = 'cmake version 4.1.2'
           for version in 3.22.1 4.1.2; do
-            binary="$ANDROID_HOME/cmake/$version/bin/cmake"
+            cmake_root="$ANDROID_HOME/cmake/$version"
+            binary="$cmake_root/bin/cmake"
             test -x "$binary"
-            test "$("$binary" --version | head -n 1)" = "cmake version $version"
             "$binary" --version
+            test "$(awk -F ' *= *' '$1 == "Pkg.Revision" {print $2}' "$cmake_root/source.properties")" = "$version"
+            # SDK CMake may report a vendor commit suffix; check its documented numeric fields.
+            "$binary" -E capabilities | jq -e --arg expected "$version" \
+              '.version | {string,major,minor,patch,suffix,isDirty} | select(([.major,.minor,.patch] | map(tostring) | join(".")) == $expected)'
           done
           # Binding uses 4.1.2; the unmodified app default is explicitly provisioned at 3.22.1.
           printf '%s\n' "$cmake_bin" >> "$GITHUB_PATH"
