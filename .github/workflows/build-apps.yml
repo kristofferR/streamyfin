@@ -1,49 +1,39 @@
-name: Spatial audio validation
+name: App native merge graph probe
 
 on:
   workflow_dispatch:
-    inputs:
-      resume_from:
-        description: First archive to run (skip only archives already verified for these exact candidates)
-        type: choice
-        default: spatial-ios
-        options: [spatial-ios, spatial-tvos, progress-ios, progress-tvos]
-
-      android_run_id:
-        description: Optional prior run with successful native tests, compile and ABI checks for this exact workflow/candidate; requires coordinator verification
-        type: string
-        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: streamyfin-spatial-validation
+  group: streamyfin-spatial-app-graph-probe
   cancel-in-progress: false
 
 jobs:
-  android:
-    name: Validate Android source binding
+  probe:
+    name: Dry-run baseline and candidate app native producer graph
     if: github.repository == 'kristofferR/streamyfin'
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 40
     env:
       CI: 'true'
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: 9f25cbbbbc40cc64b37a336c972ab75d09d0ecf2
-      PROGRESS_TREE: db3c48de38c2a7e7dbccf22aea38da3bd226eb05
-      ANDROID_RUN_ID: ${{ inputs.android_run_id }}
+      BASELINE_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
+      BASELINE_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
+      CANDIDATE_REF: d6275aeab9dbb88146af6af99632f92071a5b971
+      CANDIDATE_TREE: 433f86c7dc3ba2158077b084f3fd32d1729045a2
     steps:
-      - name: Checkout audited validation branch
+      - name: Checkout audited probe branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify workflow-only override before Android work
+      - name: Verify workflow-only probe override and same pinned host
         shell: bash
         run: |
           set -euo pipefail
@@ -51,37 +41,11 @@ jobs:
           test "$(git rev-parse "$spatial_ref^{tree}")" = 0d394d71a9f008bdff3b0b1451c2135267b00d6c
           git diff --exit-code "$spatial_ref" HEAD -- . ':!.github/workflows/build-apps.yml'
           git merge-base --is-ancestor "$spatial_ref" HEAD
-
-      - name: Checkout exact progress candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ env.PROGRESS_REF }}
-          persist-credentials: false
-
-      - name: Verify exact Android source and immutable binding inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$PROGRESS_REF"
-          test "$(git rev-parse HEAD^{tree})" = "$PROGRESS_TREE"
-          cd modules/mpv-player/android/libmpv-binding
-          sha256sum -c consumer/source-inputs.sha256
-
-      - name: Verify explicitly supplied preceding Android success
-        if: inputs.android_run_id != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$ANDROID_RUN_ID" =~ ^[0-9]+$ ]]
-          # Public read-only metadata, no credential or permission expansion.
-          curl --fail --silent --show-error "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN_ID" > "$RUNNER_TEMP/prior-android-run.json"
-          jq -e --arg sha "$GITHUB_SHA" '.head_sha == $sha and .event == "workflow_dispatch" and .path == ".github/workflows/build-apps.yml" and .status == "completed"' "$RUNNER_TEMP/prior-android-run.json"
-          attempt="$(jq -r .run_attempt "$RUNNER_TEMP/prior-android-run.json")"
-          curl --fail --silent --show-error "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN_ID/attempts/$attempt/jobs?per_page=100" > "$RUNNER_TEMP/prior-android-jobs.json"
-          jq -e '[.jobs[] | select(.name == "Validate Android source binding" and .conclusion == "success") | select(any(.steps[]; .name == "Native identity scenarios without media" and .conclusion == "success")) | select(any(.steps[]; .name == "Compile source and consumer modules and run unit tests" and .conclusion == "success")) | select(any(.steps[]; .name == "Verify ABI, JNI and source-only dependency selection" and .conclusion == "success"))] | length == 1' "$RUNNER_TEMP/prior-android-jobs.json"
+          test "$(git rev-parse "$BASELINE_REF^{tree}")" = "$BASELINE_TREE"
+          test "$(git rev-parse "$CANDIDATE_REF^{tree}")" = "$CANDIDATE_TREE"
+          git diff --exit-code "$BASELINE_REF" "$CANDIDATE_REF" -- package.json bun.lock plugins/withGradleProperties.ts modules/mpv-player/android/build.gradle
 
       - name: Install Android verifier utilities
-        if: inputs.android_run_id == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -89,20 +53,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends ripgrep ruby unzip coreutils diffutils gawk
 
       - name: Set up Bun
-        if: inputs.android_run_id == ''
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: '1.4.2'
 
       - name: Set up Java
-        if: inputs.android_run_id == ''
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android command-line tools
-        if: inputs.android_run_id == ''
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         env:
           ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
@@ -113,7 +74,6 @@ jobs:
           log-accepted-android-sdk-licenses: 'false'
 
       - name: Verify Android SDK root and command-line tools
-        if: inputs.android_run_id == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -132,11 +92,9 @@ jobs:
           printf 'SDKMANAGER_PATH=%s\n' "$sdk_manager" >> "$GITHUB_ENV"
 
       - name: Install exact Android build tools
-        if: inputs.android_run_id == ''
         run: '"$SDKMANAGER_PATH" --sdk_root="$ANDROID_SDK_ROOT" "platforms;android-36" "build-tools;35.0.0" "ndk;29.0.14206865" "cmake;4.1.2"'
 
       - name: Preflight Android verifier and native tools
-        if: inputs.android_run_id == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -163,296 +121,222 @@ jobs:
             "$cmake_bin/$tool" --version
           done
           test "$("$cmake_bin/cmake" --version | head -n 1)" = 'cmake version 4.1.2'
-          # Use the pinned SDK CMake/CTest for the host scenarios too.
+          # Expose only the pinned SDK CMake for tool inventory; no configure/build is run.
           printf '%s\n' "$cmake_bin" >> "$GITHUB_PATH"
 
-      - name: Prepare generated Android project with frozen dependencies
-        if: inputs.android_run_id == ''
+      - name: Write read-only configuration and graph helpers
+        id: probe_setup
         shell: bash
         run: |
           set -euo pipefail
-          bun install --frozen-lockfile
-          bun run expo prebuild --platform android --clean --no-install
-          git diff --exit-code -- bun.lock package.json
+          command -v timeout
+          command -v jq
+          command -v tail
+          mkdir -p "$RUNNER_TEMP/app-graph-diagnostics"
+          cat > "$RUNNER_TEMP/probe-app-graph.init.gradle" <<'GROOVY'
+          import groovy.json.JsonOutput
 
-      - name: Native identity scenarios without media
-        if: inputs.android_run_id == ''
-        shell: bash
-        run: |
+          // Read-only configuration/producer inventory. Never change the graph or task predicates.
+          def output = new File(System.getenv('PROBE_OUTPUT'))
+          def label = System.getenv('PROBE_LABEL')
+          if (!(label in ['baseline', 'candidate'])) throw new GradleException('Unknown probe label')
+          def writeBounded = { String suffix, String text, int limit ->
+              if (text.getBytes('UTF-8').length > limit) throw new GradleException("Probe ${suffix} exceeds text limit")
+              new File(output, "${label}-${suffix}").setText(text, 'UTF-8')
+          }
+          def selectedVariants = []
+          gradle.beforeProject { p ->
+              if (p.path == ':app') p.pluginManager.withPlugin('com.android.application') {
+                  def components = p.extensions.getByName('androidComponents')
+                  components.onVariants(components.selector().withBuildType('debug')) { variant ->
+                      selectedVariants.add(variant)
+                  }
+              }
+          }
+          gradle.projectsEvaluated {
+              def app = gradle.rootProject.findProject(':app')
+              if (app == null) return // Included build plugins may configure their own builds.
+              if (!gradle.startParameter.dryRun || gradle.startParameter.taskNames != [':app:mergeDebugNativeLibs']) {
+                  throw new GradleException('Probe requires exactly :app:mergeDebugNativeLibs --dry-run')
+              }
+              if (app.findProperty('android.builder.sdkDownload')?.toString() != 'false') {
+                  throw new GradleException('Probe must disable automatic SDK downloads')
+              }
+              def info = [source: System.getenv('PROBE_SOURCE'), tree: System.getenv('PROBE_TREE'),
+                          gradle: gradle.gradleVersion, mainTaskExecution: 'dry-run', sdkAutoDownload: false]
+              try {
+                  def loader = app.plugins.getPlugin('com.android.application').class.classLoader
+                  info.agp = loader.loadClass('com.android.Version').getField('ANDROID_GRADLE_PLUGIN_VERSION').get(null)
+                  if (info.agp != '8.12.0') throw new GradleException("Unexpected AGP ${info.agp}; probe API audit is for 8.12.0")
+                  def android = app.extensions.getByName('android')
+                  if (android.ndkVersion != '29.0.14206865') throw new GradleException('Unexpected app NDK request')
+                  def sdkComponents = app.extensions.getByName('androidComponents').sdkComponents
+                  def sdk = sdkComponents.sdkDirectory.get().asFile.canonicalFile
+                  def ndk = sdkComponents.ndkDirectory.get().asFile.canonicalFile
+                  if (sdk != new File(System.getenv('ANDROID_HOME')).canonicalFile ||
+                          ndk != new File(sdk, 'ndk/29.0.14206865').canonicalFile) {
+                      throw new GradleException('App resolved SDK/NDK outside pinned roots')
+                  }
+                  def ndkProperties = new Properties()
+                  new File(ndk, 'source.properties').withInputStream { ndkProperties.load(it) }
+                  info.sdkRoot = sdk.path
+                  info.ndk = [requested: android.ndkVersion, root: ndk.path, resolved: ndkProperties.getProperty('Pkg.Revision')]
+                  if (info.ndk.resolved != '29.0.14206865') throw new GradleException('Resolved NDK version mismatch')
+                  info.appAbis = android.defaultConfig.ndk.abiFilters.toList().sort()
+                  info.cmakeFile = android.externalNativeBuild.cmake.path?.canonicalPath
+                  info.cmakeArguments = android.defaultConfig.externalNativeBuild.cmake.arguments.findAll {
+                      it.startsWith('-DANDROID_STL=') || it.startsWith('-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=')
+                  }.collect { it.toString() }
+                  def requestedCmake = android.externalNativeBuild.cmake.version
+                  def requirements = loader.loadClass('com.android.build.gradle.internal.cxx.configure.CmakeVersionRequirements')
+                          .getConstructor(String).newInstance([requestedCmake] as Object[])
+                  def effectiveCmake = requirements.effectiveRequestVersion.toString()
+                  def cmakeRoot = new File(sdk, 'cmake')
+                  def installed = (cmakeRoot.listFiles() ?: []).findAll { it.isDirectory() }.sort { it.name }.collect { directory ->
+                      def properties = new Properties()
+                      def file = new File(directory, 'source.properties')
+                      if (file.isFile()) file.withInputStream { properties.load(it) }
+                      [folder: directory.name, revision: properties.getProperty('Pkg.Revision'),
+                       executable: new File(directory, 'bin/cmake').isFile()]
+                  }
+                  if (installed.size() > 10) throw new GradleException('Unexpected CMake inventory size')
+                  def matching = installed.findAll { it.revision == effectiveCmake && it.executable }
+                  info.cmake = [dslRequested: requestedCmake, effectiveRequiredByAgp: effectiveCmake, installed: installed,
+                                matchingInstalled: matching, agpResolvedExecutable: null,
+                                resolution: matching ? 'PRESENT_BUT_RESOLUTION_DEFERRED_TO_CONFIGURE_TASK' : 'MISSING_EFFECTIVE_VERSION_NO_INSTALL',
+                                note: 'Dry-run does not execute CMake discovery/configure; no tool is guessed or installed']
+                  if (selectedVariants.size() != 1) throw new GradleException('Expected exactly one debug app variant')
+                  def packaging = selectedVariants[0].packaging.jniLibs
+                  info.nativePackaging = [pickFirsts: packaging.pickFirsts.get().toList().sort(),
+                                          excludes: packaging.excludes.get().toList().sort(),
+                                          keepDebugSymbols: packaging.keepDebugSymbols.get().toList().sort()]
+              } finally {
+                  writeBounded('config.json', JsonOutput.prettyPrint(JsonOutput.toJson(info)) + '\n', 65536)
+              }
+          }
+          gradle.taskGraph.whenReady { graph ->
+              if (!graph.allTasks.any { it.path == ':app:mergeDebugNativeLibs' }) return
+              if (!gradle.startParameter.dryRun) throw new GradleException('Refusing task execution')
+              def tasks = graph.allTasks
+              if (tasks.size() > 2000) throw new GradleException('Probe graph exceeds task limit')
+              def rows = ['order\ttask\ttype\tdirect_dependencies\tfinalizers']
+              tasks.eachWithIndex { task, index ->
+                  rows.add([index, task.path, task.class.name,
+                            task.taskDependencies.getDependencies(task).collect { it.path }.sort().join(','),
+                            task.finalizedBy.getDependencies(task).collect { it.path }.sort().join(',')].join('\t'))
+              }
+              writeBounded('tasks.tsv', rows.join('\n') + '\n', 524288)
+              def forbidden = tasks.findAll { task ->
+                  task.name ==~ /(?i).*(upload|publish|install|validateSigning|sign.*Apk).*/ ||
+                      (task.project.path == ':app' && task.name ==~ /(?i)(assemble.*|bundle.*|packageDebug|packageRelease|sign.*)/)
+              }.collect { it.path }
+              if (forbidden) throw new GradleException("Unexpected non-merge producers/finalizers: ${forbidden.join(', ')}")
+          }
+          GROOVY
+          cat > "$RUNNER_TEMP/probe-app-graph.sh" <<'SH'
+          #!/bin/bash
           set -euo pipefail
-          binding=modules/mpv-player/android/libmpv-binding
-          cmake -S "$binding/consumer/native-tests" -B "$RUNNER_TEMP/identity-tests"
-          cmake --build "$RUNNER_TEMP/identity-tests"
-          ctest --test-dir "$RUNNER_TEMP/identity-tests" --output-on-failure
-
-      - name: Confirm actual source and host module tasks
-        if: inputs.android_run_id == ''
-        working-directory: android
-        run: ./gradlew --no-daemon :streamyfin-libmpv-binding:tasks --all :mpv-player:tasks --all
-
-      - name: Compile source and consumer modules and run unit tests
-        id: android_compile
-        if: inputs.android_run_id == ''
-        working-directory: android
-        run: ./gradlew --no-daemon :streamyfin-libmpv-binding:assembleDebug :streamyfin-libmpv-binding:testDebugUnitTest :mpv-player:compileDebugKotlin :mpv-player:testDebugUnitTest
-
-      - name: Report every native member before strict verification
-        if: inputs.android_run_id == ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          export LC_ALL=C
-          binding=modules/mpv-player/android/libmpv-binding
-          released="$(cat "$binding/consumer/build/releasedMedia/artifact-path.txt")"
-          candidate="$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar"
-          diagnostics="$RUNNER_TEMP/native-byte-diagnostics"
+          label="${1:?baseline or candidate}"
+          source_ref="${2:?exact ref}"
+          source_tree="${3:?exact tree}"
+          case "$label" in baseline|candidate) ;; *) exit 1 ;; esac
+          test "$(git rev-parse HEAD)" = "$source_ref"
+          test "$(git rev-parse HEAD^{tree})" = "$source_tree"
+          diagnostics="$RUNNER_TEMP/app-graph-diagnostics"
           mkdir -p "$diagnostics"
-          temporary="$(mktemp -d)"
-          trap 'rm -rf "$temporary"' EXIT
-          unzip -Z1 "$released" | rg '^jni/[^/]+/[^/]+\.so$' | sort > "$temporary/released-members"
-          unzip -Z1 "$candidate" | rg '^jni/[^/]+/[^/]+\.so$' | sort > "$temporary/candidate-members"
-          sort -u "$temporary/released-members" "$temporary/candidate-members" > "$temporary/all-members"
-          report="$diagnostics/native-members.tsv"
-          printf '# source=%s\n' "$PROGRESS_REF" > "$report"
-          printf 'abi\tname\trole\treleased_size\treleased_sha256\tcandidate_size\tcandidate_sha256\tcomparison\n' >> "$report"
-          runtime_differences=0
-          core_differences=0
-          while IFS= read -r member; do
-            abi="${member#jni/}"
-            abi="${abi%%/*}"
-            name="${member##*/}"
-            old_size=-; old_hash=-; new_size=-; new_hash=-
-            if rg -Fxq -- "$member" "$temporary/released-members"; then
-              unzip -p "$released" "$member" > "$temporary/old.so"
-              old_size="$(wc -c < "$temporary/old.so")"
-              old_hash="$(sha256sum "$temporary/old.so" | cut -d ' ' -f 1)"
-            fi
-            if rg -Fxq -- "$member" "$temporary/candidate-members"; then
-              unzip -p "$candidate" "$member" > "$temporary/new.so"
-              new_size="$(wc -c < "$temporary/new.so")"
-              new_hash="$(sha256sum "$temporary/new.so" | cut -d ' ' -f 1)"
-            fi
-            comparison=DIFFERENT
-            if [ "$old_hash" = - ]; then comparison=ADDED
-            elif [ "$new_hash" = - ]; then comparison=MISSING
-            elif [ "$old_size" = "$new_size" ] && [ "$old_hash" = "$new_hash" ]; then comparison=MATCH
-            fi
-            case "$name" in
-              libplayer.so) role=rebuilt-binding ;;
-              libc++_shared.so) role=shared-runtime
-                if [ "$comparison" != MATCH ]; then runtime_differences=$((runtime_differences + 1)); fi ;;
-              *) role=released-core
-                if [ "$comparison" != MATCH ]; then core_differences=$((core_differences + 1)); fi ;;
-            esac
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$abi" "$name" "$role" "$old_size" "$old_hash" "$new_size" "$new_hash" "$comparison" >> "$report"
-          done < "$temporary/all-members"
-          printf '# differences_excluding_rebuilt_binding: runtime=%s cores=%s\n' "$runtime_differences" "$core_differences" >> "$report"
-          cat "$report"
-
-      - name: Verify ABI, JNI and source-only dependency selection
-        if: ${{ !cancelled() && inputs.android_run_id == '' && steps.android_compile.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          binding=modules/mpv-player/android/libmpv-binding
-          input="$(cat "$binding/consumer/build/releasedMedia/artifact-path.txt")"
-          diagnostics="$RUNNER_TEMP/native-byte-diagnostics"
-          mkdir -p "$diagnostics"
-          # Only the audited verifier is traced, never setup/authentication/env.
-          PS4='+ verifier:${LINENO}: ' bash -x "$binding/consumer/verify-aar.sh" "$input" "$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar" "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" 2>&1 | tee "$diagnostics/strict-verifier.log"
-          cd android
-          ./gradlew --no-daemon :streamyfin-libmpv-binding:verifyHostUsesSourceBinding
-          ./gradlew --no-daemon :mpv-player:dependencyInsight --dependency dev.jdtech.mpv:libmpv --configuration debugRuntimeClasspath
-          cd ..
+          raw="$RUNNER_TEMP/$label-graph-raw.log"
+          started="$(date +%s)"
+          finish() {
+              result=$?
+              trap - EXIT
+              if [ -f "$raw" ]; then tail -c 131072 "$raw" > "$diagnostics/$label-dry-run.log"; fi
+              jq -n --arg source "$source_ref" --arg tree "$source_tree" --argjson exit_code "$result" \
+                  --argjson elapsed_seconds "$(( $(date +%s) - started ))" \
+                  --arg lock_sha256 "$(sha256sum bun.lock | cut -d ' ' -f 1)" \
+                  --arg package_sha256 "$(sha256sum package.json | cut -d ' ' -f 1)" \
+                  '{source:$source,tree:$tree,exit_code:$exit_code,elapsed_seconds:$elapsed_seconds,lock_sha256:$lock_sha256,package_sha256:$package_sha256,main_task_execution:"dry-run",included_build_plugin_compilation_may_occur:true}' \
+                  > "$diagnostics/$label-status.json"
+              exit "$result"
+          }
+          trap finish EXIT
+          timeout --signal=TERM --kill-after=30s 180s bun install --frozen-lockfile
+          timeout --signal=TERM --kill-after=30s 120s bun run expo prebuild --platform android --clean --no-install
           git diff --exit-code -- bun.lock package.json
-
-      - name: Retain native byte diagnostics as short-lived text only
-        if: always() && inputs.android_run_id == ''
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-byte-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/native-byte-diagnostics/native-members.tsv
-            ${{ runner.temp }}/native-byte-diagnostics/strict-verifier.log
-          retention-days: 1
-          if-no-files-found: warn
-
-      - name: Remove Android build output
-        if: always()
-        run: rm -rf android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx "$RUNNER_TEMP/identity-tests"
-
-  validate:
-    needs: android
-
-    if: github.repository == 'kristofferR/streamyfin'
-    runs-on: macos-26
-    # Prior archives took about 33 min iOS / 26 min tvOS. Four cold archives,
-    # installs and checks need more than the original 150-minute budget.
-    timeout-minutes: 210
-    env:
-      CI: 'true'
-      EXPO_NO_TELEMETRY: '1'
-      SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
-      SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: 9f25cbbbbc40cc64b37a336c972ab75d09d0ecf2
-      PROGRESS_TREE: db3c48de38c2a7e7dbccf22aea38da3bd226eb05
-    steps:
-      - name: Checkout audited validation branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify exact spatial candidate and workflow-only delta
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse "$SPATIAL_REF^{tree}")" = "$SPATIAL_TREE"
-          git diff --exit-code "$SPATIAL_REF" HEAD -- . ':!.github/workflows/build-apps.yml'
-          git merge-base --is-ancestor "$SPATIAL_REF" HEAD
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: '1.4.2'
-
-      - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90
-        with:
-          xcode-version: '26.6'
-
-      - name: Verify Xcode version
-        shell: bash
-        run: |
-          set -euo pipefail
-          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
-          test "$(head -n 1 "$RUNNER_TEMP/xcode-version.txt")" = 'Xcode 26.6'
-
-      - name: Cache dependency downloads only
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.2-${{ env.SPATIAL_REF }}-${{ env.PROGRESS_REF }}-${{ hashFiles('bun.lock') }}
-
-      - name: Write unsigned archive helper
-        shell: bash
-        run: |
-          cat > "$RUNNER_TEMP/archive-unsigned.sh" <<'SH'
-          set -euo pipefail
-          source_dir="$(cd "$1" && pwd)"
-          export EXPO_TV="$2"
-          cd "$source_dir"
-          pod_lock="$RUNNER_TEMP/pods-$(git rev-parse HEAD)-$EXPO_TV.lock"
-          trap 'rm -rf "$source_dir/ios" "$source_dir/build" "$HOME/Library/Developer/Xcode/DerivedData"' EXIT
-          bun run expo prebuild --clean --no-install
-          git diff --exit-code -- bun.lock package.json
+          if [ "$label" = candidate ]; then
+              (cd modules/mpv-player/android/libmpv-binding && sha256sum -c consumer/source-inputs.sha256)
+          fi
+          export PROBE_OUTPUT="$diagnostics" PROBE_LABEL="$label" PROBE_SOURCE="$source_ref" PROBE_TREE="$source_tree"
           (
-            cd ios
-            pod install
-            cp Podfile.lock "$pod_lock"
-            pod install --deployment
-            cmp Podfile.lock "$pod_lock"
-          )
-          if [ -f modules/mpv-player/ios/MPVFileIdentity.swift ]; then
-            header_list="$RUNNER_TEMP/mpv-headers-$(git rev-parse HEAD)-$EXPO_TV.txt"
-            rg --files --no-ignore ios/Pods/MPVKit | rg '/Headers/mpv/client.h$' > "$header_list"
-            test -s "$header_list"
-            while IFS= read -r header; do
-              test "$(shasum -a 256 "$header" | cut -d ' ' -f 1)" = 3c073236a09cb456c6e80587d5523c8771c32fb22ca014e0f99cc3d43905b75c
-              rg -q 'MPV_EXPORT int mpv_command_ret' "$header"
-              rg -q 'typedef struct mpv_event_start_file' "$header"
-            done < "$header_list"
-          fi
-          if [ "$EXPO_TV" = 0 ]; then
-            bun run ios:unsigned-build --no-install --skip-credentials --verbose
-          else
-            bun run ios:unsigned-build:tv --no-install --skip-credentials --verbose
-          fi
-          cmp ios/Podfile.lock "$pod_lock"
+              cd android
+              timeout --signal=TERM --kill-after=30s 480s ./gradlew --no-daemon --no-configuration-cache --no-build-cache \
+                  --console=plain -Pandroid.builder.sdkDownload=false \
+                  --init-script "$RUNNER_TEMP/probe-app-graph.init.gradle" :app:mergeDebugNativeLibs --dry-run
+          ) 2>&1 | tee "$raw"
           git diff --exit-code -- bun.lock package.json
           SH
 
-      - name: Native track-selection regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash modules/mpv-player/tests/native-audio-track-selection.sh
-          source_path=modules/mpv-player/ios/MPVLayerRenderer.swift
-          trap 'git show "$SPATIAL_REF:$source_path" > "$source_path"' EXIT
-          git show "$SPATIAL_REF^:$source_path" > "$source_path"
-          if bash modules/mpv-player/tests/native-audio-track-selection.sh; then
-            echo 'Regression test unexpectedly passed before the speed-state fix'
-            exit 1
-          fi
-
-      - name: Spatial candidate quality and track-mapping tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          bun install --frozen-lockfile
-          bun run typecheck
-          bun run check
-          bun run test:unit --runInBand utils/jellyfin/subtitleUtils.test.ts utils/nativePlayer/resolveTrackIndexes.test.ts
-          git diff --exit-code -- bun.lock package.json
-
-      - name: Archive exact spatial candidate for iOS unsigned
-        if: inputs.resume_from == 'spatial-ios'
-        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE" 0
-
-      - name: Archive exact spatial candidate for tvOS unsigned
-        if: inputs.resume_from == 'spatial-ios' || inputs.resume_from == 'spatial-tvos'
-        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE" 1
-
-      - name: Remove spatial dependencies before progress candidate
-        run: rm -rf node_modules
-
-      - name: Checkout exact progress candidate
+      - name: Checkout exact published-dependency baseline
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ env.PROGRESS_REF }}
-          path: progress-candidate
+          ref: ${{ env.BASELINE_REF }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify progress candidate and run native generation scenarios
-        working-directory: progress-candidate
+      - name: Probe exact baseline without task execution
         shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$PROGRESS_REF"
-          test "$(git rev-parse HEAD^{tree})" = "$PROGRESS_TREE"
-          bash modules/mpv-player/tests/native-progress-generation.sh
+        run: bash "$RUNNER_TEMP/probe-app-graph.sh" baseline "$BASELINE_REF" "$BASELINE_TREE"
 
-      - name: Progress candidate quality and event-order tests
-        working-directory: progress-candidate
+      - name: Remove baseline generated project and dependencies
+        id: baseline_cleanup
+        if: ${{ always() && steps.probe_setup.outcome == 'success' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          bun install --frozen-lockfile
-          bun run typecheck
-          bun run check
-          bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts utils/nativePlayer/applyProgressTick.test.ts utils/nativePlayer/syncPlay.test.ts utils/nativePlayer/resolveTeardownReport.test.ts
-          git diff --exit-code -- bun.lock package.json
-          source_path=utils/nativePlayer/applyLoadEvent.ts
-          trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"' EXIT
-          git show "56c39e439a4529de13a38434bb76fd149ce34f14:$source_path" > "$source_path"
-          # The previous candidate lacked canonical hostname matching.
-          git show "56c39e439a4529de13a38434bb76fd149ce34f14:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts
-          trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"; git show "$PROGRESS_REF:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts' EXIT
-          if bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts; then
-            echo 'Regression test unexpectedly passed before hostname normalization'
-            exit 1
-          fi
+        run: rm -rf node_modules android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx
 
-      - name: Archive exact progress candidate for iOS unsigned
-        if: inputs.resume_from != 'progress-tvos'
-        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE/progress-candidate" 0
+      - name: Checkout exact imported-runtime candidate
+        if: ${{ !cancelled() && steps.probe_setup.outcome == 'success' && steps.baseline_cleanup.outcome == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.CANDIDATE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Archive exact progress candidate for tvOS unsigned
-        run: bash "$RUNNER_TEMP/archive-unsigned.sh" "$GITHUB_WORKSPACE/progress-candidate" 1
+      - name: Probe exact candidate without task execution
+        if: ${{ !cancelled() && steps.probe_setup.outcome == 'success' && steps.baseline_cleanup.outcome == 'success' }}
+        shell: bash
+        run: bash "$RUNNER_TEMP/probe-app-graph.sh" candidate "$CANDIDATE_REF" "$CANDIDATE_TREE"
 
-      - name: Remove all build output
+      - name: Enforce the eight named text artifact limits
+        id: text_bounds
         if: always()
-        run: rm -rf ios build progress-candidate "$HOME/Library/Developer/Xcode/DerivedData"
+        shell: bash
+        run: |
+          set -euo pipefail
+          diagnostics="$RUNNER_TEMP/app-graph-diagnostics"
+          for label in baseline candidate; do
+            for spec in config.json:65536 tasks.tsv:524288 dry-run.log:131072 status.json:4096; do
+              file="$diagnostics/$label-${spec%:*}"
+              if [ -f "$file" ]; then test "$(wc -c < "$file")" -le "${spec#*:}"; fi
+            done
+          done
+
+      - name: Retain configuration and graph text for one day
+        if: ${{ always() && steps.text_bounds.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-native-graph-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/app-graph-diagnostics/baseline-config.json
+            ${{ runner.temp }}/app-graph-diagnostics/baseline-tasks.tsv
+            ${{ runner.temp }}/app-graph-diagnostics/baseline-dry-run.log
+            ${{ runner.temp }}/app-graph-diagnostics/baseline-status.json
+            ${{ runner.temp }}/app-graph-diagnostics/candidate-config.json
+            ${{ runner.temp }}/app-graph-diagnostics/candidate-tasks.tsv
+            ${{ runner.temp }}/app-graph-diagnostics/candidate-dry-run.log
+            ${{ runner.temp }}/app-graph-diagnostics/candidate-status.json
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: Remove final generated project and dependencies
+        if: always()
+        shell: bash
+        run: rm -rf node_modules android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx
