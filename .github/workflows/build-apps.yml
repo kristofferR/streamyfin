@@ -668,7 +668,7 @@ jobs:
             dynamic = run(readelf, '--dynamic', '--wide', file)
             notes = run(readelf, '--notes', '--wide', file)
             { size: File.size(file), sha256: Digest::SHA256.file(file).hexdigest,
-              elf: header.lines.grep(/Class:|Machine:/).map(&:strip),
+              elf: header.lines.grep(/Class:|Machine:/).map { |line| line.strip.gsub(/\s+/, ' ') },
               soname: dynamic[/Library soname: \[([^\]]+)\]/, 1],
               needed: dynamic.scan(/Shared library: \[([^\]]+)\]/).flatten.sort,
               build_id: notes[/Build ID: (\h+)/, 1] }
@@ -714,6 +714,7 @@ jobs:
                 selected = identity(readelf, runtime)
                 final = identity(readelf, final_runtime)
                 original = identity(readelf, originals.fetch('libc++_shared.so'))
+                errors << "#{abi}: runtime SONAME mismatch" unless final.fetch(:soname) == 'libc++_shared.so'
                 errors << "#{abi}: merge runtime differs from first ordered provider" unless first && first.fetch('sha256') == selected.fetch(:sha256)
                 # Existing host CMake output has priority over subprojects/external AARs.
                 errors << "#{abi}: app runtime selection changed from project output" unless first && first.fetch('scope') == 'project'
@@ -747,6 +748,7 @@ jobs:
                 report[:runtimes][abi][:player_providers] = player_providers
                 stripped.select { |key, _| key.start_with?("#{abi}/") }.each do |key, file|
                   metadata = identity(readelf, file)
+                  errors << "#{key}: ELF class/machine differs from the released ABI" unless metadata.fetch(:elf) == original.fetch(:elf)
                   metadata[:merged_sha256] = Digest::SHA256.file(merged.fetch(key)).hexdigest
                   metadata[:cpp_runtime_dependency] = metadata.fetch(:needed).include?('libc++_shared.so')
                   imports = symbols(readelf, file).select do |fields|
