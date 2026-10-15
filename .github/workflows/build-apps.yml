@@ -558,6 +558,19 @@ jobs:
                       def tool = [project: project.path, ndkRequested: android.ndkVersion,
                                   cmakeRequested: android.externalNativeBuild.cmake.version]
                       info.nativeTools.add(tool)
+                      def configureTasks = graph.allTasks.findAll {
+                          it.project == project && it.class.name.contains('ExternalNativeBuildJsonTask')
+                      }
+                      tool.configureTasks = configureTasks.collect { it.path }
+                      tool.expectedAbis = configureTasks.collect { task ->
+                          def matcher = task.name =~ /^configureCMake[^\[]*\[([^\]]+)\]$/
+                          if (!matcher.matches()) throw new GradleException("Unrecognized native configure task: ${task.path}")
+                          matcher[0][1]
+                      }.unique().sort()
+                      def cmakeFile = android.externalNativeBuild.cmake.path
+                      if (cmakeFile == null || !cmakeFile.isFile()) throw new GradleException("Missing configured CMake source for ${project.path}")
+                      tool.cmakeFile = cmakeFile.canonicalPath
+                      tool.cmakeSourceDirectory = cmakeFile.parentFile.canonicalPath
                       def sdk = project.extensions.getByName('androidComponents').sdkComponents
                       def ndk = sdk.ndkDirectory.get().asFile.canonicalFile
                       tool.ndkRoot = ndk.path
@@ -565,6 +578,9 @@ jobs:
                       new File(ndk, 'source.properties').withInputStream { properties.load(it) }
                       tool.ndkResolved = properties.getProperty('Pkg.Revision')
                       if (tool.ndkResolved != '29.0.14206865') throw new GradleException("Unexpected NDK for ${project.path}")
+                      if (tool.ndkRoot != info.ndk.root || sdk.sdkDirectory.get().asFile.canonicalPath != info.sdkRoot) {
+                          throw new GradleException("Native producer resolved outside pinned SDK/NDK roots: ${project.path}")
+                      }
                       def requirement = requirementsClass.getConstructor(String).newInstance([tool.cmakeRequested] as Object[])
                       tool.cmakeEffective = requirement.effectiveRequestVersion.toString()
                       tool.cmakeExecutable = new File(sdk.sdkDirectory.get().asFile, "cmake/${tool.cmakeEffective}/bin/cmake").canonicalPath
@@ -615,12 +631,16 @@ jobs:
                       values.cache = cache.canonicalPath
                       values
                   }
-                  def source = project.extensions.getByName('android').externalNativeBuild.cmake.path.parentFile.canonicalFile
+                  def source = new File(tool.cmakeSourceDirectory)
                   def producers = entries.findAll { it.CMAKE_HOME_DIRECTORY && new File(it.CMAKE_HOME_DIRECTORY).canonicalFile == source }
                   def probes = entries - producers
                   info.cmakeCaches.addAll(producers)
                   info.cmakeProbeCaches.addAll(probes) // Retain rejected and nested probe evidence too.
                   if (producers.isEmpty()) throw new GradleException("Missing actual producer cache for ${project.path}: ${source}")
+                  def producerAbis = producers.collect { it.ANDROID_ABI }
+                  if (producerAbis.any { !it } || producerAbis.sort() != tool.expectedAbis) {
+                      throw new GradleException("Producer cache ABI coverage differs from configure tasks for ${project.path}: ${producerAbis}")
+                  }
                   entries.each { values ->
                       if (new File(values.CMAKE_COMMAND ?: '').canonicalPath != tool.cmakeExecutable) throw new GradleException("Unexpected actual CMake for ${project.path}")
                   }
@@ -635,6 +655,9 @@ jobs:
                   }
                   producers.each { values ->
                       def cache = new File(values.cache)
+                      if (new File(values.CMAKE_HOME_DIRECTORY, 'CMakeLists.txt').canonicalPath != tool.cmakeFile) {
+                          throw new GradleException("Configured/cache CMake source identity mismatch for ${project.path}")
+                      }
                       // NDK sets this as a normal variable; CMake persists it in its compiler record, not necessarily the cache.
                       def records = project.fileTree(dir: cache.parentFile,
                               includes: ['CMakeFiles/*/CMakeCXXCompiler.cmake']).files.sort { it.path }
@@ -710,8 +733,8 @@ jobs:
             files = Dir.glob(File.join(root, '**', '*.so')).sort
             raise 'missing or excessive native output' if files.empty? || files.size > 1000
             files.to_h do |file|
-              abi = file.split('/').reverse.find { |part| abis.include?(part) }
-              raise "unexpected native ABI path #{file}" unless abi
+              abi = File.basename(File.dirname(file))
+              raise "unexpected native ABI path #{file}" unless abis.include?(abi)
               ["#{abi}/#{File.basename(file)}", file]
             end.tap { |map| raise 'duplicate native members' unless map.size == files.size }
           end
@@ -760,10 +783,11 @@ jobs:
                 family_names = (selected_exports + original_exports).map { |name| name.split('@', 2).first }.to_h { |name| [name, true] }
                 providers = config.fetch('selectedInputCandidates').select do |provider|
                   provider.fetch('path').end_with?('/libc++_shared.so') &&
-                    provider.fetch('path').split('/').include?(abi)
+                    File.basename(File.dirname(provider.fetch('path'))) == abi
                 end
                 first = providers.first
                 errors << "#{abi}: no runtime provider evidence" unless first
+                errors << "#{abi}: expected one project runtime provider" unless providers.count { |provider| provider.fetch('scope') == 'project' } == 1
                 selected = identity(readelf, runtime)
                 final = identity(readelf, final_runtime)
                 original = identity(readelf, originals.fetch('libc++_shared.so'))
@@ -793,7 +817,7 @@ jobs:
                 native_load = 'Java_dev_jdtech_mpv_MPVLib_nativeLoadFile'
                 errors << "#{abi}: unexpected native binding generation" unless player_exports.include?(native_load) == (label == 'candidate')
                 player_providers = config.fetch('selectedInputCandidates').select do |provider|
-                  provider.fetch('path').end_with?('/libplayer.so') && provider.fetch('path').split('/').include?(abi)
+                  provider.fetch('path').end_with?('/libplayer.so') && File.basename(File.dirname(provider.fetch('path'))) == abi
                 end
                 expected_scope = label == 'candidate' ? 'subproject' : 'external'
                 errors << "#{abi}: unexpected player provider" unless player_providers.size == 1 &&
