@@ -104,7 +104,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bunx --no-install expo prebuild --clean --no-install
+          bun run expo prebuild --clean --no-install
           cd ios
           pod install
           pod install --deployment
@@ -123,7 +123,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bunx --no-install expo prebuild --clean --no-install
+          bun run expo prebuild --clean --no-install
           cd ios
           pod install
           pod install --deployment
