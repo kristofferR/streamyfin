@@ -700,9 +700,9 @@ extension MPVPlayerEngine: MPVLayerRendererDelegate {
 		}
 	}
 
-	func renderer(_: MPVLayerRenderer, didChangePause isPaused: Bool) {
+	func renderer(_: MPVLayerRenderer, didChangePause isPaused: Bool, loadGeneration: UInt) {
 		DispatchQueue.main.async { [weak self] in
-			guard let self else { return }
+			guard let self, loadGeneration == self.loadGeneration else { return }
 
 			print("[MPV] didChangePause: isPaused=\(isPaused), cachedDuration=\(self.cachedDuration)")
 			self.pipController?.setPlaybackRate(isPaused ? 0.0 : 1.0)

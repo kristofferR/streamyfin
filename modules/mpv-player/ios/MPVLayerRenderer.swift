@@ -14,7 +14,7 @@ enum HDRMode {
 
 protocol MPVLayerRendererDelegate: AnyObject {
     func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double, duration: Double, cacheSeconds: Double, loadGeneration: UInt)
-    func renderer(_ renderer: MPVLayerRenderer, didChangePause isPaused: Bool)
+    func renderer(_ renderer: MPVLayerRenderer, didChangePause isPaused: Bool, loadGeneration: UInt)
     func renderer(_ renderer: MPVLayerRenderer, didChangeLoading isLoading: Bool)
     func renderer(_ renderer: MPVLayerRenderer, didBecomeReadyToSeek: Bool)
     func renderer(_ renderer: MPVLayerRenderer, didBecomeTracksReady: Bool)
@@ -929,11 +929,12 @@ final class MPVLayerRenderer {
         case MPV_EVENT_FILE_LOADED:
             guard fileIdentity.receipt != nil else { return }
             // Initial pause notifications can precede the first accepted file.
-            // Reconcile the renderer cache once this file is known to be loaded.
+            // Report a changed state once this file is known to be loaded,
+            // without inventing a position for this reconciliation.
             if let handle = mpv {
                 var paused: Int32 = 0
                 if getProperty(handle: handle, name: "pause", format: MPV_FORMAT_FLAG, value: &paused) >= 0 {
-                    isPaused = paused != 0
+                    reportPause(paused != 0)
                 }
             }
             // Add external subtitles now that the file is loaded
@@ -1095,8 +1096,34 @@ final class MPVLayerRenderer {
                                   duration: cachedDuration, cacheSeconds: cachedCacheSeconds)
     }
 
+    private func capturePause(_ paused: Bool, position: Double?) -> MPVPauseReceipt? {
+        guard let identity = fileIdentity.receipt, paused != isPaused else { return nil }
+        isPaused = paused
+        let progress: MPVProgressReceipt?
+        if paused, let position, position.isFinite, position >= 0 {
+            progress = MPVProgressReceipt(identity: identity, position: position,
+                                          duration: cachedDuration, cacheSeconds: cachedCacheSeconds)
+        } else {
+            progress = nil
+        }
+        return MPVPauseReceipt(identity: identity, isPaused: paused, progress: progress)
+    }
+
+    private func reportPause(_ paused: Bool, position: Double? = nil) {
+        guard let receipt = capturePause(paused, position: position) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let progress = receipt.progress {
+                self.delegate?.renderer(self, didUpdatePosition: progress.position, duration: progress.duration,
+                                        cacheSeconds: progress.cacheSeconds, loadGeneration: progress.identity.loadGeneration)
+            }
+            self.delegate?.renderer(self, didChangePause: receipt.isPaused,
+                                    loadGeneration: receipt.identity.loadGeneration)
+        }
+    }
+
     private func refreshProperty(named name: String, event: mpv_event) {
-        guard let handle = mpv, let identity = fileIdentity.receipt,
+        guard let handle = mpv, fileIdentity.receipt != nil,
               let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee else { return }
         switch name {
         case "duration", "time-pos", "demuxer-cache-duration":
@@ -1120,7 +1147,6 @@ final class MPVLayerRenderer {
             guard property.format == MPV_FORMAT_FLAG, let data = property.data else { return }
             let newPaused = data.assumingMemoryBound(to: Int32.self).pointee != 0
             if newPaused != isPaused {
-                isPaused = newPaused
                 // Only the stopped physical clock needs an explicit query;
                 // file ownership and pause itself came from this receipt.
                 var physicalPosition = Double(0)
@@ -1129,17 +1155,7 @@ final class MPVLayerRenderer {
                     : -1
                 let pausedPosition: Double? = status >= 0 && physicalPosition.isFinite && physicalPosition >= 0
                     ? physicalPosition : nil
-                let duration = cachedDuration
-                let cacheSeconds = cachedCacheSeconds
-                let generation = identity.loadGeneration
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if let pausedPosition {
-                        self.delegate?.renderer(self, didUpdatePosition: pausedPosition, duration: duration,
-                                                cacheSeconds: cacheSeconds, loadGeneration: generation)
-                    }
-                    self.delegate?.renderer(self, didChangePause: newPaused)
-                }
+                reportPause(newPaused, position: pausedPosition)
             }
         case "paused-for-cache":
             guard property.format == MPV_FORMAT_FLAG, let data = property.data else { return }

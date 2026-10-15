@@ -7,7 +7,7 @@ trap 'rm -rf "$test_dir"' EXIT
 
 ruby - "$tests_dir/../ios/PlayerEngine.swift" "$test_dir/Progress.swift" <<'RUBY'
 source = File.read(ARGV[0])
-method = source[/^\tfunc renderer\(_: MPVLayerRenderer, didUpdatePosition.*?(?=^\tfunc renderer\(_: MPVLayerRenderer, didChangePause)/m]
+method = source[/^\tfunc renderer\(_: MPVLayerRenderer, didUpdatePosition.*?(?=^\tfunc renderer\(_: MPVLayerRenderer, didChangeLoading)/m]
 abort 'engine progress callback not found' unless method
 File.write(ARGV[1], "extension MPVPlayerEngine {\n#{method}}\n")
 RUBY
@@ -27,7 +27,7 @@ MODULE
 
 ruby - "$tests_dir/../ios/MPVLayerRenderer.swift" "$test_dir/RendererReceipts.swift" <<'RUBY'
 source = File.read(ARGV[0])
-methods = ['private static func playlistEntryID', 'private static func eventDouble', 'private func captureProgress'].map do |name|
+methods = ['private static func playlistEntryID', 'private static func eventDouble', 'private func captureProgress', 'private func capturePause', 'private func reportPause'].map do |name|
   start = source.index(name) or abort "missing production method: #{name}"
   finish = source.index('{', start) or abort 'missing method body'
   depth = 1

@@ -15,12 +15,16 @@ final class MPVLayerRenderer {}
 final class PipController {
     var isPictureInPictureActive = true
     var position = 0.0
+    var rate = 1.0
     func setCurrentTimeFromSeconds(_ value: Double) { position = value }
+    func setPlaybackRate(_ value: Double) { rate = value }
 }
 final class ProgressDelegate {
     var positions: [Double] = []
+    var pauses: [Bool] = []
     func engine(_ engine: MPVPlayerEngine, didUpdateProgress position: Double,
                 duration: Double, cacheSeconds: Double) { positions.append(position) }
+    func engine(_ engine: MPVPlayerEngine, didChangePause paused: Bool) { pauses.append(paused) }
 }
 final class MPVPlayerEngine {
     var loadGeneration: UInt = 1
@@ -28,6 +32,8 @@ final class MPVPlayerEngine {
     var cachedDuration = 0.0
     var pipController: PipController? = PipController()
     var delegate: ProgressDelegate? = ProgressDelegate()
+    var nowPlaying: [Bool] = []
+    func syncNowPlaying(isPlaying: Bool) { nowPlaying.append(isPlaying) }
 }
 
 @main
@@ -64,6 +70,20 @@ struct ProgressGenerationTests {
         DispatchQueue.main.drain()
         precondition(engine.cachedPosition == 30 && engine.pipController?.position == 30,
                      "shutdown invalidates outstanding progress before any mutation")
-        print("Native progress generations: 4 scenarios passed")
+        engine.renderer(renderer, didChangePause: true, loadGeneration: 4)
+        engine.loadGeneration = 5
+        DispatchQueue.main.drain()
+        precondition(engine.pipController?.rate == 1 && engine.nowPlaying.isEmpty && engine.delegate!.pauses.isEmpty,
+                     "an old pause cannot mutate PiP, Now Playing or JS at final delivery")
+
+        engine.renderer(renderer, didChangePause: true, loadGeneration: 5)
+        DispatchQueue.main.drain()
+        precondition(engine.pipController?.rate == 0 && engine.nowPlaying == [false] && engine.delegate!.pauses == [true],
+                     "the accepted pause reaches PiP, Now Playing and JS")
+        engine.renderer(renderer, didChangePause: false, loadGeneration: 5)
+        engine.loadGeneration = 6 // shutdown invalidates pause delivery too
+        DispatchQueue.main.drain()
+        precondition(engine.pipController?.rate == 0 && engine.delegate!.pauses == [true])
+        print("Native progress and pause final-delivery generations passed")
     }
 }

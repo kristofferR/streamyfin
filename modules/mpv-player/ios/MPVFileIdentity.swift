@@ -57,3 +57,9 @@ struct MPVProgressReceipt {
     let duration: Double
     let cacheSeconds: Double
 }
+
+struct MPVPauseReceipt {
+    let identity: MPVFileIdentity.Receipt
+    let isPaused: Bool
+    let progress: MPVProgressReceipt?
+}

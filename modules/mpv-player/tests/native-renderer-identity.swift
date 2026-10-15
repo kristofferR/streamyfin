@@ -1,13 +1,40 @@
 import Foundation
 import MPVKit
 
-// The identity policy, node decoder, event decoder and captureProgress method
+// The identity policy, node/event decoders and progress/pause receipt methods
 // are production code. Only UIKit/mpv ownership and delivery are replaced here.
+enum DispatchQueue {
+    static let main = DeliveryQueue()
+}
+final class DeliveryQueue {
+    var pending: [() -> Void] = []
+    func async(execute work: @escaping () -> Void) { pending.append(work) }
+    func drain() {
+        while !pending.isEmpty { pending.removeFirst()() }
+    }
+}
+final class RendererDelegate {
+    var pauses: [Bool] = []
+    var generations: [UInt] = []
+    var progress: [Double] = []
+    var durations: [Double] = []
+    func renderer(_ renderer: MPVLayerRenderer, didChangePause paused: Bool, loadGeneration: UInt) {
+        pauses.append(paused)
+        generations.append(loadGeneration)
+    }
+    func renderer(_ renderer: MPVLayerRenderer, didUpdatePosition position: Double,
+                  duration: Double, cacheSeconds: Double, loadGeneration: UInt) {
+        progress.append(position)
+        durations.append(duration)
+    }
+}
 final class MPVLayerRenderer {
     var fileIdentity = MPVFileIdentity()
     var cachedPosition = 120.0
     var cachedDuration = 0.0
     var cachedCacheSeconds = 0.0
+    var isPaused = true
+    var delegate: RendererDelegate? = RendererDelegate()
 }
 
 @main
@@ -112,6 +139,44 @@ struct RendererIdentityTests {
         renderer.fileIdentity.start(handle: newHandle, entryID: 13)
         precondition(renderer.captureProgress(named: "time-pos", value: 999) == nil,
                      "a late result/start cannot resurrect an invalidated request")
-        print("Renderer native identity, C node/payload decoding and cache receipts passed")
+        let pauseRenderer = MPVLayerRenderer()
+        let pauseHandle = MPVFileIdentity.Handle()
+        pauseRenderer.fileIdentity.begin(handle: pauseHandle, generation: 10)
+        pauseRenderer.fileIdentity.bind(handle: pauseHandle, generation: 10, entryID: 41)
+        pauseRenderer.fileIdentity.start(handle: pauseHandle, entryID: 41)
+        pauseRenderer.reportPause(true)
+        DispatchQueue.main.drain()
+        precondition(pauseRenderer.delegate!.pauses.isEmpty && pauseRenderer.delegate!.progress.isEmpty,
+                     "an unchanged paused state neither duplicates a notification nor invents progress")
+        // FILE_LOADED reconciliation then a queued equal pause property.
+        pauseRenderer.reportPause(false)
+        pauseRenderer.reportPause(false)
+        DispatchQueue.main.drain()
+        precondition(!pauseRenderer.isPaused && pauseRenderer.delegate!.pauses == [false],
+                     "cached true/native false reports the change once; the equal event cannot swallow it")
+        precondition(pauseRenderer.delegate!.generations == [10] && pauseRenderer.delegate!.progress.isEmpty,
+                     "reconciliation carries file generation and never fabricates progress")
+
+        pauseRenderer.reportPause(true)
+        pauseRenderer.reportPause(true, position: 999)
+        DispatchQueue.main.drain()
+        precondition(pauseRenderer.isPaused && pauseRenderer.delegate!.pauses == [false, true],
+                     "cached false/native true reports once, including when the next event is equal")
+        precondition(pauseRenderer.delegate!.progress.isEmpty,
+                     "the paused FILE_LOADED path does not report a made-up physical clock")
+
+        pauseRenderer.reportPause(false)
+        pauseRenderer.cachedDuration = 240
+        pauseRenderer.reportPause(true, position: 133)
+        pauseRenderer.cachedDuration = 999
+        DispatchQueue.main.drain()
+        precondition(pauseRenderer.delegate!.progress == [133] && pauseRenderer.delegate!.durations == [240],
+                     "a genuine pause preserves the validated physical-clock snapshot")
+        pauseRenderer.fileIdentity.clear()
+        pauseRenderer.reportPause(false, position: 900)
+        DispatchQueue.main.drain()
+        precondition(pauseRenderer.isPaused && pauseRenderer.delegate!.pauses == [false, true, false, true],
+                     "an unowned pause cannot change the cache or notify a new session")
+        print("Renderer native identity, C decoding and progress/pause receipts passed")
     }
 }
