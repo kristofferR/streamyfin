@@ -1,0 +1,117 @@
+import Foundation
+import MPVKit
+
+// The identity policy, node decoder, event decoder and captureProgress method
+// are production code. Only UIKit/mpv ownership and delivery are replaced here.
+final class MPVLayerRenderer {
+    var fileIdentity = MPVFileIdentity()
+    var cachedPosition = 120.0
+    var cachedDuration = 0.0
+    var cachedCacheSeconds = 0.0
+}
+
+@main
+struct RendererIdentityTests {
+    static func commandResult(_ status: Int32, _ id: Int64,
+                              key: String = "playlist_entry_id",
+                              format: mpv_format = MPV_FORMAT_INT64) -> Int64? {
+        var value = mpv_node()
+        value.format = format
+        value.u.int64 = id
+        var keyBytes = Array(key.utf8CString)
+        return keyBytes.withUnsafeMutableBufferPointer { bytes in
+            var keys: [UnsafeMutablePointer<CChar>?] = [bytes.baseAddress]
+            var values = [value]
+            return keys.withUnsafeMutableBufferPointer { keys in
+                values.withUnsafeMutableBufferPointer { values in
+                    var list = mpv_node_list()
+                    list.num = 1
+                    list.keys = keys.baseAddress
+                    list.values = values.baseAddress
+                    return withUnsafeMutablePointer(to: &list) { pointer in
+                        var result = mpv_node()
+                        result.format = MPV_FORMAT_NODE_MAP
+                        result.u.list = pointer
+                        return MPVLayerRenderer.playlistEntryID(from: result, status: status)
+                    }
+                }
+            }
+        }
+    }
+
+    static func main() {
+        let renderer = MPVLayerRenderer()
+        let handle = MPVFileIdentity.Handle()
+        let largeID = Int64(1) << 40
+        precondition(commandResult(0, largeID) == largeID, "all entry-ID bits survive the real C node parser")
+        precondition(commandResult(-1, largeID) == nil, "failed command cannot bind an otherwise valid node")
+        precondition(commandResult(0, -1) == nil && commandResult(0, 1, key: "other") == nil)
+        precondition(commandResult(0, 1, format: MPV_FORMAT_NONE) == nil)
+        precondition(MPVLayerRenderer.playlistEntryID(from: mpv_node(), status: 0) == nil)
+
+        renderer.fileIdentity.begin(handle: handle, generation: 1)
+        renderer.fileIdentity.bind(handle: handle, generation: 1, entryID: commandResult(0, 11))
+        renderer.fileIdentity.begin(handle: handle, generation: 2)
+        renderer.fileIdentity.bind(handle: handle, generation: 2, entryID: commandResult(0, 12))
+        // Request 1 never starts. The sole surviving START belongs to request 2.
+        renderer.fileIdentity.start(handle: handle, entryID: 12)
+        let surviving = renderer.captureProgress(named: "duration", value: 1800)!
+        precondition(surviving.identity.loadGeneration == 2 && surviving.position == 120)
+
+        // Same URL reload: native entry identity, not URL equality, controls cache writes.
+        renderer.fileIdentity.begin(handle: handle, generation: 3)
+        precondition(renderer.captureProgress(named: "time-pos", value: 900) == nil)
+        precondition(renderer.cachedPosition == 120, "outgoing receipts cannot pollute the new resume seed")
+        renderer.fileIdentity.start(handle: handle, entryID: 13)
+        precondition(renderer.captureProgress(named: "time-pos", value: 0) == nil,
+                     "a START/property preceding result binding cannot borrow the requested generation")
+        renderer.fileIdentity.bind(handle: handle, generation: 3, entryID: commandResult(0, 13))
+        let current = renderer.captureProgress(named: "time-pos", value: 121)!
+        precondition(current.identity.loadGeneration == 3 && current.identity.entryID == 13)
+        precondition(surviving.identity.loadGeneration == 2 && surviving.position == 120,
+                     "later mutable cache updates cannot relabel or change a captured receipt")
+
+        renderer.fileIdentity.start(handle: handle, entryID: 99)
+        renderer.fileIdentity.start(handle: handle, entryID: 88)
+        precondition(renderer.captureProgress(named: "duration", value: 999) == nil)
+        renderer.fileIdentity.start(handle: handle, entryID: 13)
+        renderer.fileIdentity.end(handle: handle, entryID: 12)
+        precondition(renderer.fileIdentity.receipt?.entryID == 13, "unrelated END cannot clear another file")
+        renderer.fileIdentity.end(handle: handle, entryID: 13)
+        precondition(renderer.captureProgress(named: "time-pos", value: 999) == nil)
+
+        renderer.fileIdentity.begin(handle: handle, generation: 4)
+        renderer.fileIdentity.start(handle: handle, entryID: 14)
+        renderer.fileIdentity.bind(handle: handle, generation: 4, entryID: commandResult(-1, 14))
+        precondition(renderer.captureProgress(named: "duration", value: 0) == nil)
+        precondition(renderer.cachedDuration == 1800, "rejection cannot mutate an accepted cache")
+
+        renderer.fileIdentity.clear() // stop/shutdown/queue overflow
+        let newHandle = MPVFileIdentity.Handle()
+        renderer.fileIdentity.begin(handle: newHandle, generation: 5)
+        renderer.fileIdentity.bind(handle: newHandle, generation: 5, entryID: commandResult(0, 13))
+        renderer.fileIdentity.start(handle: handle, entryID: 13)
+        precondition(renderer.captureProgress(named: "time-pos", value: 999) == nil,
+                     "a reused numeric ID from an old handle is not the new file")
+        renderer.fileIdentity.start(handle: newHandle, entryID: 13)
+        var nativeValue = 122.0
+        withUnsafeMutablePointer(to: &nativeValue) { pointer in
+            var property = mpv_event_property()
+            property.format = MPV_FORMAT_DOUBLE
+            property.data = UnsafeMutableRawPointer(pointer)
+            let value = MPVLayerRenderer.eventDouble(property)!
+            let receipt = renderer.captureProgress(named: "time-pos", value: value)!
+            pointer.pointee = 999
+            precondition(receipt.position == 122 && receipt.identity.handle === newHandle,
+                         "real event payload data is copied before mpv can reuse its storage")
+            property.format = MPV_FORMAT_NONE
+            precondition(MPVLayerRenderer.eventDouble(property) == nil)
+        }
+        renderer.fileIdentity.clear()
+        renderer.fileIdentity.bind(handle: newHandle, generation: 5, entryID: 13)
+        renderer.fileIdentity.start(handle: newHandle, entryID: 13)
+        precondition(renderer.captureProgress(named: "time-pos", value: 999) == nil,
+                     "a late result/start cannot resurrect an invalidated request")
+        print("Renderer native identity, C node/payload decoding and cache receipts passed")
+    }
+}

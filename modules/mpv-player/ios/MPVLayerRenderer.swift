@@ -124,9 +124,9 @@ final class MPVLayerRenderer {
     private var _isLoading: Bool = false
     private var _isReadyToSeek: Bool = false
     private var _isSeeking: Bool = false
-    /// Queue-confined identities waiting for mpv to emit MPV_EVENT_START_FILE.
-    private var pendingLoadGenerations: [UInt] = []
-    private var activeLoadGeneration: UInt = 0
+    private var fileIdentity = MPVFileIdentity()
+    private var identityHandle: OpaquePointer?
+    private var identitySource = MPVFileIdentity.Handle()
 
     // Progress update throttling - CRITICAL for performance!
     // DO NOT REMOVE THIS THROTTLE - it is essential for battery life and CPU efficiency.
@@ -562,8 +562,8 @@ final class MPVLayerRenderer {
         }
 
         queue.async { [weak self] in
-            self?.pendingLoadGenerations.removeAll()
-            self?.activeLoadGeneration = 0
+            self?.fileIdentity.clear()
+            self?.identityHandle = nil
         }
 
         // Clear wakeup callback first to stop event processing
@@ -665,6 +665,9 @@ final class MPVLayerRenderer {
 
             guard let handle = self.mpv else { return }
 
+            let source = self.identify(handle)
+            self.fileIdentity.begin(handle: source, generation: loadGeneration)
+
             self.apply(commands: preset.commands, on: handle)
             // Stop previous playback before loading new file
             self.command(handle, ["stop"])
@@ -699,6 +702,9 @@ final class MPVLayerRenderer {
             // delegate a resumed file was at 0:00, which was then reported to
             // the server and cleared the item's resume point.
             self.cachedPosition = max(0, startPosition ?? 0)
+            self.cachedDuration = 0
+            self.cachedCacheSeconds = 0
+            self.lastProgressUpdateTime = 0
             // Set initial audio track if specified
             if let audioId = self.initialAudioId, audioId > 0 {
                 self.setAudioTrack(audioId)
@@ -714,8 +720,17 @@ final class MPVLayerRenderer {
                 self.disableSubtitles()
             }
             let target = url.isFileURL ? url.path : url.absoluteString
-            self.pendingLoadGenerations.append(loadGeneration)
-            self.command(handle, ["loadfile", target, "replace"])
+            // Synchronous only on the mpv queue, never main or under a host
+            // lock. Native events can already be queued, but processEvents()
+            // cannot consume them until this result has been bound.
+            var result = mpv_node()
+            let status = self.withCStringArray(["loadfile", target, "replace"]) { args in
+                mpv_command_ret(handle, args, &result)
+            }
+            let entryID = Self.playlistEntryID(from: result, status: status)
+            if status >= 0 { mpv_free_node_contents(&result) }
+            self.fileIdentity.bind(handle: source, generation: loadGeneration, entryID: entryID)
+            self.checkError(status)
         }
     }
     
@@ -868,6 +883,27 @@ final class MPVLayerRenderer {
     }
     
     // MARK: - Event Handling
+
+    private func identify(_ handle: OpaquePointer) -> MPVFileIdentity.Handle {
+        if identityHandle != handle {
+            fileIdentity.clear()
+            identityHandle = handle
+            identitySource = MPVFileIdentity.Handle()
+        }
+        return identitySource
+    }
+
+    private static func playlistEntryID(from result: mpv_node, status: Int32) -> Int64? {
+        guard status >= 0, result.format == MPV_FORMAT_NODE_MAP,
+              let list = result.u.list?.pointee,
+              let keys = list.keys, let values = list.values else { return nil }
+        for index in 0..<max(0, Int(list.num)) {
+            guard let key = keys[index], String(cString: key) == "playlist_entry_id" else { continue }
+            let value = values[index]
+            return value.format == MPV_FORMAT_INT64 && value.u.int64 >= 0 ? value.u.int64 : nil
+        }
+        return nil
+    }
     
     private func processEvents() {
         queue.async { [weak self] in
@@ -878,20 +914,28 @@ final class MPVLayerRenderer {
                       let eventPointer = mpv_wait_event(handle, 0) else { return }
                 let event = eventPointer.pointee
                 if event.event_id == MPV_EVENT_NONE { break }
-                self.handleEvent(event)
+                self.handleEvent(event, source: self.identify(handle))
                 if event.event_id == MPV_EVENT_SHUTDOWN { break }
             }
         }
     }
     
-    private func handleEvent(_ event: mpv_event) {
+    private func handleEvent(_ event: mpv_event, source: MPVFileIdentity.Handle) {
         switch event.event_id {
         case MPV_EVENT_START_FILE:
-            if !pendingLoadGenerations.isEmpty {
-                activeLoadGeneration = pendingLoadGenerations.removeFirst()
-            }
+            let entryID = event.data?.assumingMemoryBound(to: mpv_event_start_file.self).pointee.playlist_entry_id
+            fileIdentity.start(handle: source, entryID: entryID)
 
         case MPV_EVENT_FILE_LOADED:
+            guard fileIdentity.receipt != nil else { return }
+            // Initial pause notifications can precede the first accepted file.
+            // Reconcile the renderer cache once this file is known to be loaded.
+            if let handle = mpv {
+                var paused: Int32 = 0
+                if getProperty(handle: handle, name: "pause", format: MPV_FORMAT_FLAG, value: &paused) >= 0 {
+                    isPaused = paused != 0
+                }
+            }
             // Add external subtitles now that the file is loaded
             if !pendingExternalSubtitles.isEmpty, let handle = mpv {
                 for (index, subUrl) in pendingExternalSubtitles.enumerated() {
@@ -945,6 +989,7 @@ final class MPVLayerRenderer {
             detectHDRMode()
 
         case MPV_EVENT_SEEK:
+            guard fileIdentity.receipt != nil else { return }
             // Seek started - show loading indicator and enable immediate progress updates
             isSeeking = true
             if !isLoading {
@@ -956,9 +1001,10 @@ final class MPVLayerRenderer {
             }
             
         case MPV_EVENT_PLAYBACK_RESTART:
+            guard let identity = fileIdentity.receipt else { return }
             // Video playback has started/restarted (including after seek)
             isSeeking = false
-            let generation = activeLoadGeneration
+            let generation = identity.loadGeneration
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.rendererPlaybackDidRestart(
@@ -974,11 +1020,15 @@ final class MPVLayerRenderer {
                 }
             }
         case MPV_EVENT_END_FILE:
+            let identity = fileIdentity.receipt
+            let endFile = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee
+            fileIdentity.end(handle: source, entryID: endFile?.playlist_entry_id)
             // Only a real EOF counts as "playback ended". The other reasons
             // (stop, quit, error, redirect) fire during teardown and stream
             // replacement, where an end event would incorrectly trigger the
             // native player's auto-advance/auto-close.
-            if let endFile = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee,
+            if let identity, let endFile,
+               endFile.playlist_entry_id == identity.entryID,
                endFile.reason == MPV_END_FILE_REASON_EOF {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
@@ -992,7 +1042,12 @@ final class MPVLayerRenderer {
                 refreshProperty(named: name, event: event)
             }
 
+        case MPV_EVENT_QUEUE_OVERFLOW:
+            fileIdentity.clear()
+            Logger.shared.log("mpv event queue overflow; file identity invalidated", type: "Warn")
+
         case MPV_EVENT_SHUTDOWN:
+            fileIdentity.clear()
             Logger.shared.log("mpv shutdown", type: "Warn")
 
         case MPV_EVENT_LOG_MESSAGE:
@@ -1021,114 +1076,103 @@ final class MPVLayerRenderer {
         }
     }
     
-    private func refreshProperty(named name: String, event: mpv_event) {
-        guard let handle = mpv else { return }
+    private static func eventDouble(_ property: mpv_event_property) -> Double? {
+        guard property.format == MPV_FORMAT_DOUBLE, let data = property.data else { return nil }
+        return data.assumingMemoryBound(to: Double.self).pointee
+    }
+
+    /// Production receipt path, also exercised by the native identity harness.
+    /// Reject before changing a renderer cache; the Engine guard is a later fence.
+    private func captureProgress(named name: String, value: Double) -> MPVProgressReceipt? {
+        guard let identity = fileIdentity.receipt else { return nil }
         switch name {
-        case "duration":
-            var value = Double(0)
-            let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_DOUBLE, value: &value)
-            if status >= 0 {
-                cachedDuration = value
-                let generation = activeLoadGeneration
-                let position = cachedPosition
-                let cacheSeconds = cachedCacheSeconds
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didUpdatePosition: position, duration: value, cacheSeconds: cacheSeconds, loadGeneration: generation)
-                }
-            }
-        case "time-pos":
-            var value = Double(0)
-            let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_DOUBLE, value: &value)
-            if status >= 0 {
-                cachedPosition = value
-                // Always update immediately when seeking, otherwise throttle to once per second
+        case "duration": cachedDuration = value
+        case "time-pos": cachedPosition = value
+        case "demuxer-cache-duration": cachedCacheSeconds = value
+        default: return nil
+        }
+        return MPVProgressReceipt(identity: identity, position: cachedPosition,
+                                  duration: cachedDuration, cacheSeconds: cachedCacheSeconds)
+    }
+
+    private func refreshProperty(named name: String, event: mpv_event) {
+        guard let handle = mpv, let identity = fileIdentity.receipt,
+              let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee else { return }
+        switch name {
+        case "duration", "time-pos", "demuxer-cache-duration":
+            // The event payload is already a snapshot made by mpv. A later
+            // get_property could read a different file's current value.
+            guard let value = Self.eventDouble(property),
+                  let receipt = captureProgress(named: name, value: value) else { return }
+            if name == "demuxer-cache-duration" { return }
+            if name == "time-pos" {
                 let now = CFAbsoluteTimeGetCurrent()
-                let shouldUpdate = isSeeking || (now - lastProgressUpdateTime >= 1.0)
-                if shouldUpdate {
-                    lastProgressUpdateTime = now
-                    let generation = activeLoadGeneration
-                    let duration = cachedDuration
-                    let cacheSeconds = cachedCacheSeconds
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        self.delegate?.renderer(self, didUpdatePosition: value, duration: duration, cacheSeconds: cacheSeconds, loadGeneration: generation)
-                    }
-                }
+                guard isSeeking || now - lastProgressUpdateTime >= 1.0 else { return }
+                lastProgressUpdateTime = now
             }
-        case "demuxer-cache-duration":
-            var value = Double(0)
-            let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_DOUBLE, value: &value)
-            if status >= 0 {
-                cachedCacheSeconds = value
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didUpdatePosition: receipt.position,
+                                        duration: receipt.duration, cacheSeconds: receipt.cacheSeconds,
+                                        loadGeneration: receipt.identity.loadGeneration)
             }
         case "pause":
-            var flag: Int32 = 0
-            let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_FLAG, value: &flag)
-            if status >= 0 {
-                let newPaused = flag != 0
-                if newPaused != isPaused {
-                    isPaused = newPaused
-                    // The playing clock is reported only once per second and
-                    // cachedPosition can contain an optimistic seek target.
-                    // Capture mpv's physical clock before the immediate pause
-                    // report, keeping both callbacks immutable and ordered.
-                    var physicalPosition = Double(0)
-                    let positionStatus = newPaused
-                        ? getProperty(handle: handle, name: "time-pos", format: MPV_FORMAT_DOUBLE, value: &physicalPosition)
-                        : -1
-                    let pausedPosition: Double? = positionStatus >= 0
-                        && physicalPosition.isFinite && physicalPosition >= 0
-                        ? physicalPosition : nil
-                    let duration = cachedDuration
-                    let cacheSeconds = cachedCacheSeconds
-                    let generation = activeLoadGeneration
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        if let pausedPosition {
-                            self.delegate?.renderer(self, didUpdatePosition: pausedPosition, duration: duration, cacheSeconds: cacheSeconds, loadGeneration: generation)
-                        }
-                        self.delegate?.renderer(self, didChangePause: newPaused)
+            guard property.format == MPV_FORMAT_FLAG, let data = property.data else { return }
+            let newPaused = data.assumingMemoryBound(to: Int32.self).pointee != 0
+            if newPaused != isPaused {
+                isPaused = newPaused
+                // Only the stopped physical clock needs an explicit query;
+                // file ownership and pause itself came from this receipt.
+                var physicalPosition = Double(0)
+                let status = newPaused
+                    ? getProperty(handle: handle, name: "time-pos", format: MPV_FORMAT_DOUBLE, value: &physicalPosition)
+                    : -1
+                let pausedPosition: Double? = status >= 0 && physicalPosition.isFinite && physicalPosition >= 0
+                    ? physicalPosition : nil
+                let duration = cachedDuration
+                let cacheSeconds = cachedCacheSeconds
+                let generation = identity.loadGeneration
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if let pausedPosition {
+                        self.delegate?.renderer(self, didUpdatePosition: pausedPosition, duration: duration,
+                                                cacheSeconds: cacheSeconds, loadGeneration: generation)
                     }
+                    self.delegate?.renderer(self, didChangePause: newPaused)
                 }
             }
         case "paused-for-cache":
-            var flag: Int32 = 0
-            let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_FLAG, value: &flag)
-            if status >= 0 {
-                let buffering = flag != 0
-                if buffering != isLoading {
-                    isLoading = buffering
-                    DispatchQueue.main.async { [weak self] in
-                        guard let self else { return }
-                        self.delegate?.renderer(self, didChangeLoading: buffering)
-                    }
+            guard property.format == MPV_FORMAT_FLAG, let data = property.data else { return }
+            let buffering = data.assumingMemoryBound(to: Int32.self).pointee != 0
+            if buffering != isLoading {
+                isLoading = buffering
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.renderer(self, didChangeLoading: buffering)
                 }
             }
         case "track-list/count":
-            var trackCount: Int64 = 0
-            let status = getProperty(handle: handle, name: name, format: MPV_FORMAT_INT64, value: &trackCount)
-            if status >= 0 && trackCount > 0 {
-                Logger.shared.log("Track list updated: \(trackCount) tracks available", type: "Info")
+            guard property.format == MPV_FORMAT_INT64, let data = property.data else { return }
+            let count = data.assumingMemoryBound(to: Int64.self).pointee
+            if count > 0 {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.delegate?.renderer(self, didBecomeTracksReady: true)
                 }
             }
         case "current-ao":
-            // Audio output is now active - notify delegate
-            if let aoName = getStringProperty(handle: handle, name: name) {
-                print("[MPV] 🔊 Audio output selected: \(aoName)")
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didSelectAudioOutput: aoName)
-                }
+            guard property.format == MPV_FORMAT_STRING, let data = property.data,
+                  let string = data.assumingMemoryBound(to: UnsafePointer<CChar>?.self).pointee else { return }
+            let aoName = String(cString: string)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didSelectAudioOutput: aoName)
             }
         default:
             break
         }
     }
-    
+
     // MARK: - Audio diagnostics
 
     /// mpv "info" lines worth keeping in the app log: the negotiated output
