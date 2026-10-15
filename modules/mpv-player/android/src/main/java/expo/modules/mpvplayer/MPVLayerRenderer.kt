@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceView
 import android.view.View
+import dev.jdtech.mpv.FileIdentity
 import expo.modules.mpvplayer.nativeplayer.MpvOwnership
 import expo.modules.mpvplayer.nativeplayer.engine.PlayerEngine
 import expo.modules.mpvplayer.nativeplayer.engine.VideoLoadConfig
@@ -18,6 +19,8 @@ import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
+
+private typealias MpvReceipt = MpvLoadPolicy.Receipt<MPVLib, FileIdentity, MpvEventSnapshot>
 
 internal fun normalizeVideoDimensions(width: Int, height: Int, rotation: Int): Pair<Int, Int> {
     val normalizedRotation = ((rotation % 360) + 360) % 360
@@ -65,6 +68,10 @@ class MPVLayerRenderer(
 
         // One worker for every renderer: only one player is alive at a time,
         // and a daemon thread never keeps the process from exiting.
+        private val loadExecutor = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "mpv-load").apply { isDaemon = true }
+        }
+
         private val surfaceSizeExecutor = Executors.newSingleThreadExecutor { task ->
             Thread(task, "mpv-surface-size").apply { isDaemon = true }
         }
@@ -101,6 +108,7 @@ class MPVLayerRenderer(
     override var delegate: PlayerEngine.Delegate? = null
     
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val loadPolicy = MpvLoadPolicy<MPVLib, FileIdentity, MpvEventSnapshot>()
 
     // The latest surface size not yet handed to mpv; see updateSurfaceSize.
     private val pendingSurfaceSize = AtomicReference<String?>(null)
@@ -127,6 +135,7 @@ class MPVLayerRenderer(
     private var cachedCacheSeconds: Double = 0.0
     private var _isPaused: Boolean = true
     private var _isLoading: Boolean = false
+    private var loadingRevision = 0L
     // Whether playback was intended to be running when recovery kicked in.
     // Set by recoverVideoOutput's caller so the post-reload state follows the
     // user's intent (resume) instead of assuming paused.
@@ -395,6 +404,11 @@ class MPVLayerRenderer(
     }
 
     override fun stop() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { stop() }
+            return
+        }
+        loadPolicy.clear()
         invalidateSeekReports()
         val pendingToken = pendingOwnershipToken
         val activeToken = activeOwnershipToken
@@ -426,14 +440,14 @@ class MPVLayerRenderer(
             return
         }
 
-        // Teardown runs on a background daemon thread. mpv's "stop" command
+        // Teardown shares the native load worker. mpv's "stop" command
         // flushes the demuxer queue and releases the MediaCodec hardware
         // decoder — synchronous JNI work that can block for hundreds of ms
         // on TV hardware. Running it on the main thread produced a visible
         // delay/stutter between pressing "exit" and the confirm alert
         // appearing. The local `m` keeps the MPVLib instance alive for the
         // lifetime of this thread even though we've already nulled `mpv`.
-        Thread {
+        loadExecutor.execute {
             // Drop force-window BEFORE issuing stop. With keep-open=always +
             // force-window=yes, mpv tears down the decoder at stop time but
             // tries to keep the VO alive — which fires an internal
@@ -469,7 +483,7 @@ class MPVLayerRenderer(
             } finally {
                 activeToken?.let(MpvOwnership::release)
             }
-        }.also { it.isDaemon = true }.start()
+        }
     }
     
     override fun attachSurfaceView(surfaceView: SurfaceView) {
@@ -648,76 +662,74 @@ class MPVLayerRenderer(
     }
     
     override fun load(config: VideoLoadConfig) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { load(config) }
+            return
+        }
+        val loadConfig = config.copy(
+            headers = config.headers?.toMap(),
+            externalSubtitles = config.externalSubtitles?.toList(),
+        )
+        val handle = mpv ?: return
+        // Invalidate old receipts before issuing any synchronous JNI command.
+        val request = loadPolicy.begin(handle)
         invalidateSeekReports()
-        val url = config.url
+        val url = loadConfig.url
         currentUrl = url
-        currentHeaders = config.headers
-        pendingExternalSubtitles = config.externalSubtitles ?: emptyList()
+        currentHeaders = loadConfig.headers
+        pendingExternalSubtitles = loadConfig.externalSubtitles ?: emptyList()
         activeExternalSubtitles = pendingExternalSubtitles
-        this.initialSubtitleId = config.initialSubtitleId
-        this.initialAudioId = config.initialAudioId
-        this.currentLoop = config.loop
+        this.initialSubtitleId = loadConfig.initialSubtitleId
+        this.initialAudioId = loadConfig.initialAudioId
+        this.currentLoop = loadConfig.loop
         _videoWidth = 0
         _videoHeight = 0
         _videoRotation = 0
 
         _isLoading = true
+        loadingRevision++
         isReadyToSeek = false
-        mainHandler.post { delegate?.onLoadingChanged(true) }
+        val startPosition = loadConfig.startPosition?.takeIf { it > 0 } ?: 0.0
+        cachedPosition = startPosition
+        cachedDuration = 0.0
+        cachedCacheSeconds = 0.0
+        lastProgressUpdateTime = 0
+        delegate?.onLoadingChanged(true)
+        if (!loadPolicy.isCurrent(request)) return
 
-        // Stop previous playback
-        mpv?.command(arrayOf("stop"))
-
-        // Set HTTP headers if provided
-        updateHttpHeaders(config.headers)
-
-        // Set looping
-        mpv?.setPropertyString("loop-file", if (config.loop) "inf" else "no")
-
-        // Apply cache/buffer settings from user preferences (mirrors iOS).
-        // These override the conservative defaults applied in start() so the
-        // TV/mobile settings screen actually takes effect on Android.
-        config.cacheEnabled?.let { mpv?.setOptionString("cache", it) }
-        config.cacheSeconds?.let { mpv?.setOptionString("cache-secs", it.toString()) }
-        config.demuxerMaxBytes?.let { mpv?.setOptionString("demuxer-max-bytes", "${it}MiB") }
-        config.demuxerMaxBackBytes?.let { mpv?.setOptionString("demuxer-max-back-bytes", "${it}MiB") }
-
-        // Set start position. mpv's time parser requires '.' as the decimal
-        // separator; use Locale.US so devices with other default locales
-        // (e.g. ',' as decimal separator) don't break resume-from-position.
-        val startPosition = config.startPosition
-        if (startPosition != null && startPosition > 0) {
-            mpv?.setPropertyString("start", String.format(Locale.US, "%.2f", startPosition))
-        } else {
-            mpv?.setPropertyString("start", "0")
-        }
-        // Until the first time-pos arrives the file is where it was told to
-        // start. The duration event below emits this cache as the position,
-        // and left at 0 (or at the previous file's position) it told the
-        // delegate a resumed file was at 0:00, which was then reported to the
-        // server and cleared the item's resume point.
-        cachedPosition = if (startPosition != null && startPosition > 0) startPosition else 0.0
-
-        // Set initial audio track if specified
-        val initialAudioId = config.initialAudioId
-        if (initialAudioId != null && initialAudioId > 0) {
-            setAudioTrack(initialAudioId)
-        }
-
-        // Set initial subtitle track if no external subs
-        val initialSubtitleId = config.initialSubtitleId
-        if (pendingExternalSubtitles.isEmpty()) {
-            if (initialSubtitleId != null) {
-                setSubtitleTrack(initialSubtitleId)
-            } else {
-                disableSubtitles()
+        // Native load and FILE_LOADED work share one worker. A subtitle fetch
+        // can block, but cannot run against a replacement loaded behind it.
+        loadExecutor.execute {
+            if (!loadPolicy.isCurrent(request)) return@execute
+            val result = try {
+                handle.command(arrayOf("stop"))
+                updateHttpHeaders(handle, loadConfig.headers)
+                handle.setPropertyString("loop-file", if (loadConfig.loop) "inf" else "no")
+                loadConfig.cacheEnabled?.let { handle.setOptionString("cache", it) }
+                loadConfig.cacheSeconds?.let { handle.setOptionString("cache-secs", it.toString()) }
+                loadConfig.demuxerMaxBytes?.let { handle.setOptionString("demuxer-max-bytes", "${it}MiB") }
+                loadConfig.demuxerMaxBackBytes?.let { handle.setOptionString("demuxer-max-back-bytes", "${it}MiB") }
+                handle.setPropertyString("start", String.format(Locale.US, "%.2f", startPosition))
+                loadConfig.initialAudioId?.let { if (it > 0) handle.setPropertyInt("aid", it) }
+                selectSubtitle(handle, if (loadConfig.externalSubtitles.isNullOrEmpty()) loadConfig.initialSubtitleId ?: -1 else -1)
+                if (loadPolicy.isCurrent(request)) handle.loadFile(url) else null
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to load mpv file", error)
+                null
             }
-        } else {
-            disableSubtitles()
+            mainHandler.post {
+                // bind() protects data only. JNI and delivery are outside it.
+                val binding = loadPolicy.bind(request, result?.file)
+                if (!loadPolicy.isCurrent(request)) return@post
+                if (!binding.accepted) {
+                    _isLoading = false
+                    delegate?.onLoadingChanged(false)
+                    if (loadPolicy.isCurrent(request)) delegate?.onError("Could not identify the loaded mpv file")
+                    return@post
+                }
+                binding.receipts.forEach(::deliverReceipt)
+            }
         }
-
-        // Load the file
-        mpv?.command(arrayOf("loadfile", url, "replace"))
     }
 
     override fun reloadCurrentItem() {
@@ -732,11 +744,11 @@ class MPVLayerRenderer(
         }
     }
     
-    private fun updateHttpHeaders(headers: Map<String, String>?) {
+    private fun updateHttpHeaders(handle: MPVLib, headers: Map<String, String>?) {
         // mpv properties survive a loadfile, so headers set for a previous
         // item would otherwise be sent to the next one (possibly a remote
         // stream that must not see the proxy credentials).
-        mpv?.setPropertyString("http-header-fields", "")
+        handle.setPropertyString("http-header-fields", "")
         if (headers.isNullOrEmpty()) return
 
         // http-header-fields is an mpv string *list*, and through the property
@@ -745,7 +757,7 @@ class MPVLayerRenderer(
         // the -append modifier is ignored outright. A header value containing a
         // comma therefore cannot be expressed here (it would split into two).
         val headerString = headers.entries.joinToString(",") { "${it.key}: ${it.value}" }
-        mpv?.setPropertyString("http-header-fields", headerString)
+        handle.setPropertyString("http-header-fields", headerString)
     }
     
     private fun observeProperties() {
@@ -886,26 +898,30 @@ class MPVLayerRenderer(
     }
     
     override fun setSubtitleTrack(trackId: Int) {
+        mpv?.let { selectSubtitle(it, trackId) }
+    }
+
+    private fun selectSubtitle(handle: MPVLib, trackId: Int) {
         Log.i(TAG, "setSubtitleTrack: setting sid to $trackId")
         if (trackId < 0) {
-            mpv?.setPropertyString("sid", "no")
+            handle.setPropertyString("sid", "no")
         } else {
-            mpv?.setPropertyInt("sid", trackId)
+            handle.setPropertyInt("sid", trackId)
         }
-        applyBidiModeFor(trackId)
+        applyBidiModeFor(trackId, handle)
     }
 
-    private fun applyBidiModeFor(trackId: Int) {
-        val isAss = trackId >= 0 && subtitleCodecFor(trackId).let { it == "ass" || it == "ssa" }
-        mpv?.setPropertyString("sub-ass-style-overrides", if (isAss) "Encoding=-1" else "")
+    private fun applyBidiModeFor(trackId: Int, handle: MPVLib? = mpv) {
+        val isAss = trackId >= 0 && subtitleCodecFor(trackId, handle).let { it == "ass" || it == "ssa" }
+        handle?.setPropertyString("sub-ass-style-overrides", if (isAss) "Encoding=-1" else "")
     }
 
-    private fun subtitleCodecFor(trackId: Int): String? {
-        val trackCount = mpv?.getPropertyInt("track-list/count") ?: 0
+    private fun subtitleCodecFor(trackId: Int, handle: MPVLib?): String? {
+        val trackCount = handle?.getPropertyInt("track-list/count") ?: 0
         for (i in 0 until trackCount) {
-            if (mpv?.getPropertyString("track-list/$i/type") != "sub") continue
-            if (mpv?.getPropertyInt("track-list/$i/id") != trackId) continue
-            return mpv?.getPropertyString("track-list/$i/codec")
+            if (handle?.getPropertyString("track-list/$i/type") != "sub") continue
+            if (handle?.getPropertyInt("track-list/$i/id") != trackId) continue
+            return handle?.getPropertyString("track-list/$i/codec")
         }
         return null
     }
@@ -1179,217 +1195,229 @@ class MPVLayerRenderer(
         return info
     }
 
-    // MARK: - MPVLib.EventObserver
-    
-    override fun eventProperty(property: String) {
-        // Property changed but no value provided
+    // Native receipts contain immutable values. All cache and delegate work is
+    // serialized on main and guarded again immediately before delivery.
+    private fun receive(handle: MPVLib, file: FileIdentity?, event: MpvEventSnapshot) {
+        val receipt = loadPolicy.receive(handle, file, event, retainEarly = event !is MpvEventSnapshot.Decimal)
+        if (receipt != null) mainHandler.post { deliverReceipt(receipt) }
     }
-    
-    override fun eventProperty(property: String, value: Long) {
-        when (property) {
-            "track-list/count" -> {
-                if (value > 0) {
-                    Log.i(TAG, "Track list updated: $value tracks available")
-                    mainHandler.post { delegate?.onTracksReady() }
-                }
+
+    override fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Long) =
+        receive(handle, file, MpvEventSnapshot.Integer(property, value))
+
+    override fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Boolean) =
+        receive(handle, file, MpvEventSnapshot.Flag(property, value))
+
+    override fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Double) =
+        receive(handle, file, MpvEventSnapshot.Decimal(property, value))
+
+    override fun event(handle: MPVLib, file: FileIdentity?, eventId: Int) {
+        if (eventId == MPVLib.MPV_EVENT_SHUTDOWN || eventId == MPVLib.MPV_EVENT_QUEUE_OVERFLOW) {
+            val request = loadPolicy.invalidate(handle) ?: return
+            mainHandler.post {
+                if (!loadPolicy.isCurrent(request) || mpv !== handle) return@post
+                isReadyToSeek = false
+                _isLoading = false
+                delegate?.onError("mpv event stream lost file identity")
             }
+            return
+        }
+        receive(handle, file, MpvEventSnapshot.Event(eventId, seekReportGeneration, seekReportRequestId))
+    }
+
+    private fun isCurrent(receipt: MpvReceipt): Boolean =
+        isRunning && mpv === receipt.request.handle && loadPolicy.isCurrent(receipt)
+
+    private fun notify(receipt: MpvReceipt, callback: (PlayerEngine.Delegate) -> Unit) {
+        if (isCurrent(receipt)) delegate?.let(callback)
+    }
+
+    private fun deliverReceipt(receipt: MpvReceipt) {
+        if (!isCurrent(receipt)) return
+        when (val event = receipt.event) {
+            is MpvEventSnapshot.Integer -> handleInteger(receipt, event.property, event.value)
+            is MpvEventSnapshot.Flag -> handleFlag(receipt, event.property, event.value)
+            is MpvEventSnapshot.Decimal -> handleDecimal(receipt, event.property, event.value)
+            is MpvEventSnapshot.Event -> handleEvent(receipt, event)
+        }
+    }
+
+    private fun handleInteger(receipt: MpvReceipt, property: String, value: Long) {
+        when (property) {
+            "track-list/count" -> if (value > 0) notify(receipt) { it.onTracksReady() }
             "chapter-list/count" -> {
                 val chapters = getChapters()
-                mainHandler.post { delegate?.onChaptersChanged(chapters) }
+                notify(receipt) { it.onChaptersChanged(chapters) }
             }
-            "video-params/w" -> {
-                val width = value.toInt()
-                if (width > 0 && width != _videoWidth) {
-                    _videoWidth = width
-                    notifyVideoDimensionsIfReady()
-                }
+            "video-params/w" -> if (value > 0 && value.toInt() != _videoWidth) {
+                _videoWidth = value.toInt()
+                notifyVideoDimensionsIfReady(receipt)
             }
-            "video-params/h" -> {
-                val height = value.toInt()
-                if (height > 0 && height != _videoHeight) {
-                    _videoHeight = height
-                    notifyVideoDimensionsIfReady()
-                }
+            "video-params/h" -> if (value > 0 && value.toInt() != _videoHeight) {
+                _videoHeight = value.toInt()
+                notifyVideoDimensionsIfReady(receipt)
             }
-            "video-params/rotate" -> {
-                val rotation = value.toInt()
-                if (rotation != _videoRotation) {
-                    _videoRotation = rotation
-                    notifyVideoDimensionsIfReady()
-                }
+            "video-params/rotate" -> if (value.toInt() != _videoRotation) {
+                _videoRotation = value.toInt()
+                notifyVideoDimensionsIfReady(receipt)
             }
         }
     }
-    
-    private fun notifyVideoDimensionsIfReady() {
+
+    private fun notifyVideoDimensionsIfReady(receipt: MpvReceipt) {
         if (_videoWidth <= 0 || _videoHeight <= 0) return
         val (width, height) = normalizeVideoDimensions(_videoWidth, _videoHeight, _videoRotation)
-        Log.i(TAG, "Video dimensions: ${width}x${height} (rotation=$_videoRotation)")
-        mainHandler.post { delegate?.onVideoDimensionsChanged(width, height) }
+        notify(receipt) { it.onVideoDimensionsChanged(width, height) }
     }
-    
-    override fun eventProperty(property: String, value: Boolean) {
+
+    private fun handleFlag(receipt: MpvReceipt, property: String, value: Boolean) {
         when (property) {
-            "pause" -> {
-                if (value != _isPaused) {
-                    _isPaused = value
-                    // time-pos notifications are throttled while playing, and
-                    // seekTo's cache is optimistic. Read the physical clock so
-                    // an immediate pause report includes the stopped frame.
-                    val report = MpvPauseReport(
-                        paused = value,
-                        position = if (value) mpv?.getPropertyDouble("time-pos") else null,
-                        duration = cachedDuration,
-                        cacheSeconds = cachedCacheSeconds,
-                    )
-                    mainHandler.post {
-                        report.deliver(
-                            onProgress = { position, duration, cache ->
-                                delegate?.onPositionChanged(position, duration, cache)
-                            },
-                            onPause = { paused -> delegate?.onPauseChanged(paused) },
-                        )
-                    }
-                }
+            "pause" -> if (value != _isPaused) {
+                _isPaused = value
+                // Read the physical stopped frame on the serialized owner, never
+                // while holding the policy lock. Delivery uses this snapshot.
+                val report = MpvPauseReport(
+                    paused = value,
+                    position = if (value) receipt.request.handle.getPropertyDouble("time-pos") else null,
+                    duration = cachedDuration,
+                    cacheSeconds = cachedCacheSeconds,
+                )
+                report.deliver(
+                    onProgress = { position, duration, cache ->
+                        notify(receipt) { it.onPositionChanged(position, duration, cache) }
+                    },
+                    onPause = { paused -> notify(receipt) { it.onPauseChanged(paused) } },
+                )
             }
             "paused-for-cache" -> {
+                loadingRevision++
                 if (value != _isLoading) {
                     _isLoading = value
-                    mainHandler.post { delegate?.onLoadingChanged(value) }
+                    notify(receipt) { it.onLoadingChanged(value) }
                 }
             }
-            "eof-reached" -> {
-                if (value) {
-                    Log.i(TAG, "EOF reached (property)")
-                    notifyPlaybackEnd()
-                } else {
-                    didNotifyPlaybackEnd = false
-                }
+            "eof-reached" -> if (value) {
+                notifyPlaybackEnd(receipt)
+            } else {
+                didNotifyPlaybackEnd = false
             }
         }
     }
-    
-    override fun eventProperty(property: String, value: String) {
-        // Handle string properties if needed
+
+    private fun reportProgress(receipt: MpvReceipt) {
+        val position = cachedPosition
+        val duration = cachedDuration
+        val cache = cachedCacheSeconds
+        notify(receipt) { it.onPositionChanged(position, duration, cache) }
     }
-    
-    override fun eventProperty(property: String, value: Double) {
+
+    private fun handleDecimal(receipt: MpvReceipt, property: String, value: Double) {
         when (property) {
             "duration" -> {
                 cachedDuration = value
-                mainHandler.post { delegate?.onPositionChanged(cachedPosition, cachedDuration, cachedCacheSeconds) }
+                reportProgress(receipt)
             }
             "time-pos" -> {
                 cachedPosition = value
-                // Always update immediately when seeking, otherwise throttle to once per second
                 val now = System.currentTimeMillis()
-                val shouldUpdate = _isSeeking || (now - lastProgressUpdateTime >= 1000)
-                if (shouldUpdate) {
+                if (_isSeeking || now - lastProgressUpdateTime >= 1000) {
                     lastProgressUpdateTime = now
-                    mainHandler.post { delegate?.onPositionChanged(cachedPosition, cachedDuration, cachedCacheSeconds) }
+                    reportProgress(receipt)
                 }
             }
-            "demuxer-cache-duration" -> {
-                cachedCacheSeconds = value
-            }
+            "demuxer-cache-duration" -> cachedCacheSeconds = value
         }
     }
-    
-    override fun event(eventId: Int) {
-        when (eventId) {
+
+    private fun handleEvent(receipt: MpvReceipt, event: MpvEventSnapshot.Event) {
+        val handle = receipt.request.handle
+        when (event.id) {
             MPVLib.MPV_EVENT_FILE_LOADED -> {
+                val subtitles = pendingExternalSubtitles
+                val audioId = initialAudioId
+                val subtitleId = initialSubtitleId ?: -1
+                pendingExternalSubtitles = emptyList()
                 didNotifyPlaybackEnd = false
-                // Add external subtitles now that file is loaded
-                if (pendingExternalSubtitles.isNotEmpty()) {
-                    pendingExternalSubtitles.forEachIndexed { index, subUrl ->
-                        android.util.Log.d("MPVRenderer", "Adding external subtitle [$index]: $subUrl")
-                        // "auto" flag = add without auto-selecting (order preserved, MPVLib.command is sync)
-                        mpv?.command(arrayOf("sub-add", subUrl, "auto"))
+                // Reconcile one-shot metadata on the main owner before the
+                // asynchronous subtitle fetch; never apply an older cache later.
+                cachedDuration = handle.getPropertyDouble("duration") ?: cachedDuration
+                cachedCacheSeconds = handle.getPropertyDouble("demuxer-cache-duration") ?: cachedCacheSeconds
+                _videoWidth = handle.getPropertyInt("video-params/w") ?: _videoWidth
+                _videoHeight = handle.getPropertyInt("video-params/h") ?: _videoHeight
+                _videoRotation = handle.getPropertyInt("video-params/rotate") ?: _videoRotation
+                reportProgress(receipt)
+                if (!isCurrent(receipt)) return
+                notifyVideoDimensionsIfReady(receipt)
+                if (!isCurrent(receipt)) return
+                handle.getPropertyBoolean("pause")?.let { handleFlag(receipt, "pause", it) }
+                if (!isCurrent(receipt)) return
+                val loadingAtReceipt = loadingRevision
+                loadExecutor.execute {
+                    if (!isCurrent(receipt)) return@execute
+                    try {
+                        subtitles.forEach { handle.command(arrayOf("sub-add", it, "auto")) }
+                        audioId?.let { if (it > 0) handle.setPropertyInt("aid", it) }
+                        selectSubtitle(handle, subtitleId)
+                        mainHandler.post {
+                            if (!isCurrent(receipt)) return@post
+                            notify(receipt) { it.onTracksReady() }
+                            if (!isCurrent(receipt)) return@post
+                            if (!isReadyToSeek) {
+                                isReadyToSeek = true
+                                notify(receipt) { it.onReadyToSeek() }
+                            }
+                            if (!isCurrent(receipt)) return@post
+                            if (loadingRevision == loadingAtReceipt && _isLoading) {
+                                _isLoading = false
+                                notify(receipt) { it.onLoadingChanged(false) }
+                            }
+                        }
+                    } catch (error: Exception) {
+                        mainHandler.post { notify(receipt) { it.onError("Could not prepare the loaded mpv file") } }
                     }
-                    pendingExternalSubtitles = emptyList()
-                }
-
-                // Apply the initial audio/subtitle selection now that the file's
-                // tracks are enumerated. Setting sid/aid before `loadfile` does not
-                // reliably stick for embedded tracks (the selection is silently
-                // dropped), so we (re)apply here for embedded and external alike.
-                // This is what makes a carried-over subtitle show up on the next
-                // episode without a manual re-selection.
-                initialAudioId?.let { if (it > 0) setAudioTrack(it) }
-                initialSubtitleId?.let { setSubtitleTrack(it) } ?: disableSubtitles()
-
-                // The disable above can race a JS-side identity selection that
-                // landed before FILE_LOADED (JS no longer passes an initial sid).
-                // Re-emit tracksReady so the idempotent JS re-apply always runs
-                // after it — for embedded-only files this is the only
-                // post-FILE_LOADED fire.
-                mainHandler.post { delegate?.onTracksReady() }
-
-                if (!isReadyToSeek) {
-                    isReadyToSeek = true
-                    mainHandler.post { delegate?.onReadyToSeek() }
-                }
-                
-                if (_isLoading) {
-                    _isLoading = false
-                    mainHandler.post { delegate?.onLoadingChanged(false) }
                 }
             }
             MPVLib.MPV_EVENT_SEEK -> {
-                // Seek started - show loading indicator and enable immediate progress updates
+                if (event.seekGeneration != seekReportGeneration || event.seekRequestId != seekReportRequestId) return
+                loadingRevision++
                 _isSeeking = true
-                activeSeekReportRequestId = seekReportRequestId
+                activeSeekReportRequestId = event.seekRequestId
                 if (!_isLoading) {
                     _isLoading = true
-                    mainHandler.post { delegate?.onLoadingChanged(true) }
+                    notify(receipt) { it.onLoadingChanged(true) }
                 }
             }
             MPVLib.MPV_EVENT_PLAYBACK_RESTART -> {
-                // Video playback has started/restarted (including after seek)
-                val generation = seekReportGeneration
+                if (event.seekGeneration != seekReportGeneration || event.seekRequestId != seekReportRequestId) return
                 val requestId = if (_isSeeking) activeSeekReportRequestId else null
-                val currentRequestId = seekReportRequestId
-                val position = mpv?.getPropertyDouble("time-pos")
+                if (requestId != null && requestId != event.seekRequestId) return
+                val position = handle.getPropertyDouble("time-pos")
                 if (position != null && position.isFinite() && position >= 0) cachedPosition = position
                 val duration = cachedDuration
                 val cache = cachedCacheSeconds
                 val wasLoading = _isLoading
+                loadingRevision++
                 _isSeeking = false
                 activeSeekReportRequestId = null
                 _isLoading = false
-                // Paused seeks may have no further time-pos notification.
-                // Persist the decoder's final clock before releasing readiness.
-                mainHandler.post {
-                    if (generation != seekReportGeneration || !isRunning) return@post
-                    if (currentRequestId != seekReportRequestId) return@post
-                    // An older seek cannot release the new seek's readiness.
-                    if (requestId != null && requestId != currentRequestId) return@post
-                    if (position != null && position.isFinite() && position >= 0) {
-                        if (requestId != null && requestId == seekReportRequestId) {
-                            delegate?.onSeekCompleted(requestId, position, duration, cache)
-                        } else if (requestId == null) {
-                            delegate?.onPositionChanged(position, duration, cache)
-                        }
+                if (position != null && position.isFinite() && position >= 0) {
+                    if (requestId != null) {
+                        notify(receipt) { it.onSeekCompleted(requestId, position, duration, cache) }
+                    } else {
+                        notify(receipt) { it.onPositionChanged(position, duration, cache) }
                     }
-                    if (wasLoading) delegate?.onLoadingChanged(false)
                 }
+                if (wasLoading) notify(receipt) { it.onLoadingChanged(false) }
             }
             MPVLib.MPV_EVENT_END_FILE -> {
-                Log.i(TAG, "Playback ended (MPV_EVENT_END_FILE)")
-                val eof = mpv?.getPropertyBoolean("eof-reached") ?: false
-                if (eof) {
-                    notifyPlaybackEnd()
-                }
-            }
-            MPVLib.MPV_EVENT_SHUTDOWN -> {
-                Log.w(TAG, "MPV shutdown")
+                if (handle.getPropertyBoolean("eof-reached") == true) notifyPlaybackEnd(receipt)
             }
         }
     }
 
-    private fun notifyPlaybackEnd() {
+    private fun notifyPlaybackEnd(receipt: MpvReceipt) {
         if (didNotifyPlaybackEnd) return
         didNotifyPlaybackEnd = true
-        mainHandler.post { delegate?.onPlaybackEnded() }
+        notify(receipt) { it.onPlaybackEnded() }
     }
 }

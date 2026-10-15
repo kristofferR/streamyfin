@@ -1,0 +1,74 @@
+# Review draft only. This file is outside .github/workflows and cannot dispatch.
+# After source consumption and exact refs are approved, add this Android job
+# before the four-archive Apple job with `needs: android`.
+name: Source binding validation draft
+on:
+  workflow_dispatch:
+    inputs:
+      app_ref:
+        description: Reviewed immutable Streamyfin commit containing the approved vendored source
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  android:
+    if: github.repository == 'kristofferR/streamyfin'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      APP_REF: ${{ inputs.app_ref }}
+      EXPO_TV: '0'
+      CI: 'true'
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - name: Require an immutable candidate
+        run: '[[ "$APP_REF" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.app_ref }}
+          persist-credentials: false
+      - name: Verify exact checkout and vendored inputs
+        run: |
+          test "$(git rev-parse HEAD)" = "$APP_REF"
+          cd modules/mpv-player/android/libmpv-binding
+          sha256sum -c consumer/source-inputs.sha256
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.2'
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install exact Android build tools
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;29.0.14206865' 'cmake;4.1.2'
+      - name: Prepare generated project with frozen JavaScript inputs
+        run: |
+          bun install --frozen-lockfile
+          bun run expo prebuild --platform android --clean --no-install
+          git diff --exit-code -- bun.lock package.json
+      - name: Native identity scenarios without a player or media
+        run: |
+          binding=modules/mpv-player/android/libmpv-binding
+          cmake -S "$binding/consumer/native-tests" -B "$RUNNER_TEMP/identity-tests"
+          cmake --build "$RUNNER_TEMP/identity-tests"
+          ctest --test-dir "$RUNNER_TEMP/identity-tests" --output-on-failure
+      - name: Confirm actual source and host module tasks
+        working-directory: android
+        run: ./gradlew --no-daemon :streamyfin-libmpv-binding:tasks --all :mpv-player:tasks --all
+      - name: Compile both modules and run focused unit tests
+        working-directory: android
+        run: |
+          ./gradlew --no-daemon :streamyfin-libmpv-binding:assembleDebug :streamyfin-libmpv-binding:testDebugUnitTest :mpv-player:compileDebugKotlin :mpv-player:testDebugUnitTest
+      - name: Verify source selection and binary compatibility
+        run: |
+          binding=modules/mpv-player/android/libmpv-binding
+          input="$(cat "$binding/consumer/build/releasedMedia/artifact-path.txt")"
+          bash "$binding/consumer/verify-aar.sh" "$input" "$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar" "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          cd android
+          ./gradlew --no-daemon :streamyfin-libmpv-binding:verifyHostUsesSourceBinding
+          ./gradlew --no-daemon :mpv-player:dependencyInsight --dependency dev.jdtech.mpv:libmpv --configuration debugRuntimeClasspath
+      - name: Remove build output
+        if: always()
+        run: |
+          rm -rf android modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx "$RUNNER_TEMP/identity-tests"

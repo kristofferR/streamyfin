@@ -1,0 +1,12 @@
+// Future Expo withProjectBuildGradle addition; this source file lives in consumer/.
+allprojects { consumer ->
+    consumer.configurations.configureEach { configuration ->
+        def rawInput = consumer.path == ':streamyfin-libmpv-binding' &&
+                configuration.name == 'releasedMediaCore'
+        if (!rawInput) {
+            configuration.resolutionStrategy.dependencySubstitution {
+                substitute module('dev.jdtech.mpv:libmpv') using project(':streamyfin-libmpv-binding')
+            }
+        }
+    }
+}

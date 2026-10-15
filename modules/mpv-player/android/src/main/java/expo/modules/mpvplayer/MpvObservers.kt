@@ -5,12 +5,10 @@ import java.util.concurrent.CopyOnWriteArrayList
 /**
  * The observers of one mpv handle.
  *
- * Callbacks run on mpv's event thread and take as long as mpv does: the
- * renderer answers FILE_LOADED by adding the external subtitles with a
- * synchronous command, which fetches them over the network. A lock held
- * across the callbacks made every add and remove wait for that, and `stop()`
- * removes its observer on the UI thread — so leaving the player while a
- * subtitle was still loading froze the app (ANR in MPVLib.removeObserver).
+ * Callbacks run on mpv's event thread. Holding a lock across an earlier
+ * FILE_LOADED callback's subtitle fetch made observer removal wait on network
+ * work and froze the UI. The renderer now schedules native load work separately;
+ * dispatch still must not hold a lock while calling an observer.
  *
  * Callbacks therefore run over a snapshot with no lock held. The price is
  * that an observer removed while an event is being delivered can still

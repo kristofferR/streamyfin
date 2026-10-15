@@ -1,0 +1,131 @@
+// Draft source project for Streamyfin's generated Android build. Not included yet.
+import java.security.MessageDigest
+
+apply plugin: 'com.android.library'
+apply from: new File(project(':expo-modules-core').projectDir, 'ExpoModulesCorePlugin.gradle')
+applyKotlinExpoModulesCorePlugin()
+
+group = 'dev.jdtech.mpv'
+version = '1.0.0-streamyfin-source'
+
+def bindingRoot = projectDir.parentFile
+def nativeInputs = layout.buildDirectory.dir('releasedMedia')
+def releasedMediaCore = configurations.create('releasedMediaCore') {
+    canBeConsumed = false
+    canBeResolved = true
+    transitive = false
+    // The root substitution draft also explicitly excludes this configuration.
+    resolutionStrategy.useGlobalDependencySubstitutionRules = false
+}
+
+dependencies {
+    add(releasedMediaCore.name, 'dev.jdtech.mpv:libmpv:1.0.0@aar')
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:${project.ext.kotlinVersion()}"
+    testImplementation 'junit:junit:4.13.2'
+}
+
+def prepareReleasedMediaCore = tasks.register('prepareReleasedMediaCore') {
+    inputs.files(releasedMediaCore)
+    outputs.dir(nativeInputs)
+    doLast {
+        // Resolution and extraction happen only when the task runs.
+        def artifact = releasedMediaCore.singleFile
+        def actual = MessageDigest.getInstance('SHA-256').digest(artifact.bytes).encodeHex().toString()
+        if (actual != 'df146592480fc8418415a06b1f1a1d6318b0088e21f52254b0e9a82b61ca8fa2') {
+            throw new GradleException('Released libmpv 1.0.0 AAR checksum mismatch')
+        }
+        def output = nativeInputs.get().asFile
+        delete(output)
+        copy {
+            from zipTree(artifact)
+            into output
+            include 'jni/**/libmpv.so', 'jni/**/libavcodec.so'
+            eachFile { path = path.replaceFirst('^jni/', 'cmake/') }
+            includeEmptyDirs = false
+        }
+        copy {
+            from zipTree(artifact)
+            into output
+            include 'jni/**/*.so'
+            exclude 'jni/**/libplayer.so', 'jni/**/libc++_shared.so',
+                    'jni/**/libmpv.so', 'jni/**/libavcodec.so'
+            includeEmptyDirs = false
+        }
+        // Diagnostic input for the post-build byte comparison; never packaged.
+        new File(output, 'artifact-path.txt').text = artifact.absolutePath
+    }
+}
+
+def prepareBindingNotices = tasks.register('prepareBindingNotices', Copy) {
+    from(bindingRoot) { include 'LICENSE' }
+    from('licenses')
+    from('headers/libavcodec/jni.h') { rename { 'ffmpeg-jni-header.h' } }
+    into layout.buildDirectory.dir('notices/META-INF/streamyfin-libmpv-binding')
+}
+
+android {
+    namespace 'dev.jdtech.mpv'
+    compileSdkVersion safeExtGet('compileSdkVersion', 36)
+    buildToolsVersion safeExtGet('buildToolsVersion', '35.0.0')
+    ndkVersion '29.0.14206865'
+    defaultConfig {
+        minSdkVersion 26
+        consumerProguardFiles new File(bindingRoot, 'libmpv/proguard-rules.pro')
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64' }
+        externalNativeBuild {
+            cmake {
+                arguments "-DRELEASED_MEDIA_ROOT=${nativeInputs.get().asFile.absolutePath}",
+                        '-DANDROID_STL=c++_shared'
+                cppFlags '-std=c++11'
+            }
+        }
+    }
+    sourceSets {
+        main {
+            java.srcDirs = [new File(bindingRoot, 'libmpv/src/main/java')]
+            jniLibs.srcDirs = [nativeInputs.map { it.dir('jni') }]
+            resources.srcDirs = [layout.buildDirectory.dir('notices')]
+        }
+        test.java.srcDirs = [new File(bindingRoot, 'libmpv/src/test/java')]
+    }
+    externalNativeBuild {
+        cmake {
+            path file('CMakeLists.txt')
+            version '4.1.2'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+    packagingOptions {
+        // Do not rewrite the released media cores while packaging this library.
+        jniLibs.keepDebugSymbols += ['**/*.so']
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn prepareReleasedMediaCore, prepareBindingNotices
+}
+tasks.configureEach {
+    if (name.startsWith('configureCMake')) dependsOn prepareReleasedMediaCore
+}
+
+tasks.register('verifyHostUsesSourceBinding') {
+    doLast {
+        def components = project(':mpv-player').configurations.debugRuntimeClasspath
+                .incoming.resolutionResult.allComponents
+        def oldBinding = components.any {
+            it.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                    it.id.group == 'dev.jdtech.mpv' && it.id.module == 'libmpv'
+        }
+        def sourceBinding = components.any {
+            it.id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier &&
+                    it.id.projectPath == ':streamyfin-libmpv-binding'
+        }
+        if (oldBinding || !sourceBinding) {
+            throw new GradleException('Host must select only the source binding, never the released binding classes/JNI')
+        }
+    }
+}

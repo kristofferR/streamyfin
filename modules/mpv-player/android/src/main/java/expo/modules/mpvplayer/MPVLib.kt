@@ -1,6 +1,8 @@
 package expo.modules.mpvplayer
 
 import android.content.Context
+import dev.jdtech.mpv.FileIdentity
+import dev.jdtech.mpv.LoadResult
 import dev.jdtech.mpv.MPVLib as LibMPV
 
 /**
@@ -22,38 +24,30 @@ import dev.jdtech.mpv.MPVLib as LibMPV
  */
 class MPVLib private constructor(private val instance: LibMPV) {
 
-    // Event observer interface — mirrors dev.jdtech.mpv.MPVLib.EventObserver
-    // so MPVLayerRenderer implements a stable, wrapper-owned signature.
+    // Only identified callbacks reach the renderer. The wrapper instance also
+    // identifies the handle when an old native event thread outlives stop().
     interface EventObserver {
-        fun eventProperty(property: String)
-        fun eventProperty(property: String, value: Long)
-        fun eventProperty(property: String, value: Boolean)
-        fun eventProperty(property: String, value: String)
-        fun eventProperty(property: String, value: Double)
-        fun event(eventId: Int)
+        fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Long)
+        fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Boolean)
+        fun eventProperty(handle: MPVLib, file: FileIdentity?, property: String, value: Double)
+        fun event(handle: MPVLib, file: FileIdentity?, eventId: Int)
     }
 
     private val observers = MpvObservers<EventObserver>()
 
     // Library event observer that forwards LibMPV callbacks to our observers.
-    private val libObserver = object : LibMPV.EventObserver {
-        override fun eventProperty(property: String) =
-            observers.dispatch { it.eventProperty(property) }
+    private val libObserver = object : LibMPV.IdentifiedEventObserver {
+        override fun eventProperty(property: String, value: Long, file: FileIdentity?) =
+            observers.dispatch { it.eventProperty(this@MPVLib, file, property, value) }
 
-        override fun eventProperty(property: String, value: Long) =
-            observers.dispatch { it.eventProperty(property, value) }
+        override fun eventProperty(property: String, value: Boolean, file: FileIdentity?) =
+            observers.dispatch { it.eventProperty(this@MPVLib, file, property, value) }
 
-        override fun eventProperty(property: String, value: Boolean) =
-            observers.dispatch { it.eventProperty(property, value) }
+        override fun eventProperty(property: String, value: Double, file: FileIdentity?) =
+            observers.dispatch { it.eventProperty(this@MPVLib, file, property, value) }
 
-        override fun eventProperty(property: String, value: String) =
-            observers.dispatch { it.eventProperty(property, value) }
-
-        override fun eventProperty(property: String, value: Double) =
-            observers.dispatch { it.eventProperty(property, value) }
-
-        override fun event(eventId: Int) =
-            observers.dispatch { it.event(eventId) }
+        override fun event(eventId: Int, file: FileIdentity?) =
+            observers.dispatch { it.event(this@MPVLib, file, eventId) }
     }
 
     fun addObserver(observer: EventObserver) = observers.add(observer)
@@ -75,6 +69,8 @@ class MPVLib private constructor(private val instance: LibMPV) {
     fun command(cmd: Array<String>) {
         instance.command(cmd)
     }
+
+    fun loadFile(url: String): LoadResult = instance.loadFile(url)
 
     fun setOptionString(name: String, value: String): Int {
         return instance.setOptionString(name, value)
@@ -130,7 +126,7 @@ class MPVLib private constructor(private val instance: LibMPV) {
             // instance and forwards every LibMPV callback to our observers
             // list. Player-specific observers are added/removed via
             // addObserver/removeObserver.
-            lib.addObserver(wrapper.libObserver)
+            lib.addIdentifiedObserver(wrapper.libObserver)
             return wrapper
         }
 
