@@ -515,6 +515,12 @@ jobs:
                                 note: 'Actual CMake discovery is verified from completed configure task caches below']
                   if (matching.size() != 1) throw new GradleException('Provision the exact app CMake version before building')
                   if (selectedVariants.size() != 1) throw new GradleException('Expected exactly one debug app variant')
+                  // PackageAndroidArtifact uses these merged variant ABIs when nonempty; splits can override them.
+                  info.packagingAbis = selectedVariants[0].nativeBuildCreationConfig.supportedAbis.toList().sort()
+                  info.abiSplitsEnabled = android.splits.abi.isEnable()
+                  if (info.packagingAbis != info.appAbis || info.packagingAbis.isEmpty() || info.abiSplitsEnabled) {
+                      throw new GradleException('Native audit requires the explicit app ABI filters without ABI splits')
+                  }
                   def packaging = selectedVariants[0].packaging.jniLibs
                   info.nativePackaging = [pickFirsts: packaging.pickFirsts.get().toList().sort(),
                                           excludes: packaging.excludes.get().toList().sort(),
@@ -702,7 +708,9 @@ jobs:
             'df146592480fc8418415a06b1f1a1d6318b0088e21f52254b0e9a82b61ca8fa2'
           config = JSON.parse(File.read(File.join(directory, "#{label}-config.json")))
           abis = %w[arm64-v8a armeabi-v7a x86_64]
+          known_abis = abis + ['x86']
           abort 'unexpected app ABI scope' unless config.fetch('appAbis').sort == abis.sort
+          abort 'unproven packaging ABI filter' unless config.fetch('packagingAbis').sort == abis.sort && config.fetch('abiSplitsEnabled') == false
 
           def run(*arguments)
             output, error, status = Open3.capture3(*arguments)
@@ -732,9 +740,10 @@ jobs:
           def inventory(root, abis)
             files = Dir.glob(File.join(root, '**', '*.so')).sort
             raise 'missing or excessive native output' if files.empty? || files.size > 1000
+            unknown = files.reject { |file| abis.include?(File.basename(File.dirname(file))) }
+            raise "unexpected native ABI paths: #{unknown.join(', ')}" unless unknown.empty?
             files.to_h do |file|
               abi = File.basename(File.dirname(file))
-              raise "unexpected native ABI path #{file}" unless abis.include?(abi)
               ["#{abi}/#{File.basename(file)}", file]
             end.tap { |map| raise 'duplicate native members' unless map.size == files.size }
           end
@@ -754,16 +763,31 @@ jobs:
           report = { source: config.fetch('source'), tree: config.fetch('tree'), app_abis: abis,
                      binding_selection: config.fetch('appBindingSelection'), modules: {}, runtimes: {},
                      cpp_requirement_scope: 'Selected/released runtime exports plus std, new/delete, CXXABI and unwind families; platform @LIBC and unrelated module-to-module imports excluded.',
-                     errors: errors, scope: 'Actual app native merge/strip and C++ dynamic symbol/version coverage; no APK, device execution or general ABI-behavior proof.' }
+                     errors: errors, scope: 'Verified package ABI-filtered native merge/strip and C++ symbol/version coverage; unused intermediate ABI members retained separately. No APK, device execution or general ABI-behavior proof.' }
           requirements = ["abi\tmodule\tcpp_imports\tstrong\tweak\tmissing_strong\tmissing_weak\trequirements_sha256"]
           begin
-            merged = inventory(config.fetch('outputs').fetch('merged'), abis)
-            stripped = inventory(config.fetch('outputs').fetch('stripped'), abis)
-            raise 'merge/strip member sets differ' unless merged.keys.sort == stripped.keys.sort
+            all_merged = inventory(config.fetch('outputs').fetch('merged'), known_abis)
+            all_stripped = inventory(config.fetch('outputs').fetch('stripped'), known_abis)
+            raise 'merge/strip member sets differ' unless all_merged.keys.sort == all_stripped.keys.sort
+            merged = all_merged.select { |key, _| abis.include?(key.split('/').first) }
+            stripped = all_stripped.select { |key, _| abis.include?(key.split('/').first) }
+            report[:unpackaged_intermediates] = all_merged.reject { |key, _| merged.key?(key) }.to_h do |key, file|
+              final = all_stripped.fetch(key)
+              [key, { reason: 'Excluded by verified nonempty variant package ABI filters, with ABI splits disabled',
+                      merged_size: File.size(file), merged_sha256: Digest::SHA256.file(file).hexdigest,
+                      stripped_size: File.size(final), stripped_sha256: Digest::SHA256.file(final).hexdigest }]
+            end
             member_names = run('unzip', '-Z1', released).lines.map(&:strip).grep(%r{\Ajni/[^/]+/[^/]+\.so\z})
             raise 'duplicate released members' unless member_names.uniq.size == member_names.size
             cores = member_names.map { |member| File.basename(member) }.uniq - %w[libplayer.so libc++_shared.so]
             raise 'unexpected published media core set' unless cores.size == 8
+            # Retain strict core equality even for dependency ABI intermediates excluded from the app.
+            report[:unpackaged_intermediates].each do |key, metadata|
+              next unless cores.include?(File.basename(key))
+              original_hash = Digest::SHA256.hexdigest(run('unzip', '-p', released, "jni/#{key}"))
+              errors << "#{key}: unpackaged intermediate changed published core bytes" unless
+                metadata[:merged_sha256] == original_hash && metadata[:stripped_sha256] == original_hash
+            end
             Dir.mktmpdir('app-native-audit') do |temporary|
               abis.each do |abi|
                 originals = {}
@@ -866,10 +890,15 @@ jobs:
             baseline = JSON.parse(File.read(File.join(directory, 'baseline-native-audit.json')))
             current = JSON.parse(File.read(File.join(directory, 'candidate-native-audit.json')))
             comparison = { baseline_source: baseline.fetch('source'), candidate_source: current.fetch('source'), errors: [], runtimes: {} }
-            %w[gradle agp appAbis ndk nativePackaging cmakeArguments].each do |field|
+            %w[gradle agp appAbis packagingAbis abiSplitsEnabled ndk nativePackaging cmakeArguments].each do |field|
               comparison[:errors] << "host #{field} differs" unless baseline_config[field] == config[field]
             end
             comparison[:errors] << 'native member sets differ' unless baseline.fetch('modules').keys.sort == current.fetch('modules').keys.sort
+            old_unused = baseline.fetch('unpackaged_intermediates')
+            new_unused = current.fetch('unpackaged_intermediates')
+            comparison[:unpackaged_intermediate_differences] = (old_unused.keys | new_unused.keys).sort.filter_map do |key|
+              {member: key, baseline: old_unused[key], candidate: new_unused[key]} unless old_unused[key] == new_unused[key]
+            end
             current.fetch('modules').each do |key, metadata|
               next if key.end_with?('/libplayer.so')
               comparison[:errors] << "#{key}: final app native bytes differ from baseline" unless
