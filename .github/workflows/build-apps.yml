@@ -57,6 +57,13 @@ jobs:
         with:
           xcode-version: '26.6'
 
+      - name: Verify Xcode version
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          test "$(head -n 1 "$RUNNER_TEMP/xcode-version.txt")" = 'Xcode 26.6'
+
       - name: Cache dependency downloads only
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -71,21 +78,23 @@ jobs:
           source_dir="$(cd "$1" && pwd)"
           export EXPO_TV="$2"
           cd "$source_dir"
+          pod_lock="$RUNNER_TEMP/pods-$(git rev-parse HEAD)-$EXPO_TV.lock"
           trap 'rm -rf "$source_dir/ios" "$source_dir/build" "$HOME/Library/Developer/Xcode/DerivedData"' EXIT
           bun run expo prebuild --clean --no-install
           git diff --exit-code -- bun.lock package.json
           (
             cd ios
             pod install
-            cp Podfile.lock "$RUNNER_TEMP/validated-pods.lock"
+            cp Podfile.lock "$pod_lock"
             pod install --deployment
-            cmp Podfile.lock "$RUNNER_TEMP/validated-pods.lock"
+            cmp Podfile.lock "$pod_lock"
           )
           if [ "$EXPO_TV" = 0 ]; then
             bun run ios:unsigned-build --no-install --skip-credentials --verbose
           else
             bun run ios:unsigned-build:tv --no-install --skip-credentials --verbose
           fi
+          cmp ios/Podfile.lock "$pod_lock"
           git diff --exit-code -- bun.lock package.json
           SH
 
