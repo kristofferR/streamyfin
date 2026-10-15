@@ -80,6 +80,14 @@ jobs:
           curl --fail --silent --show-error "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN_ID/attempts/$attempt/jobs?per_page=100" > "$RUNNER_TEMP/prior-android-jobs.json"
           jq -e '[.jobs[] | select(.name == "Validate Android source binding" and .conclusion == "success") | select(any(.steps[]; .name == "Native identity scenarios without media" and .conclusion == "success")) | select(any(.steps[]; .name == "Compile source and consumer modules and run unit tests" and .conclusion == "success")) | select(any(.steps[]; .name == "Verify ABI, JNI and source-only dependency selection" and .conclusion == "success"))] | length == 1' "$RUNNER_TEMP/prior-android-jobs.json"
 
+      - name: Install Android verifier utilities
+        if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep ruby unzip coreutils diffutils gawk
+
       - name: Set up Bun
         if: inputs.android_run_id == ''
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -126,6 +134,37 @@ jobs:
       - name: Install exact Android build tools
         if: inputs.android_run_id == ''
         run: '"$SDKMANAGER_PATH" --sdk_root="$ANDROID_SDK_ROOT" "platforms;android-36" "build-tools;35.0.0" "ndk;29.0.14206865" "cmake;4.1.2"'
+
+      - name: Preflight Android verifier and native tools
+        if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in bash dirname mktemp rm sha256sum cut unzip sort uniq cmp rg awk comm ruby cat git curl jq realpath tr tee head c++ make; do
+            command -v "$tool"
+          done
+          rg --version
+          ruby --version
+          for tool in java jar javap; do
+            test -x "$JAVA_HOME/bin/$tool"
+            test "$(realpath "$(command -v "$tool")")" = "$(realpath "$JAVA_HOME/bin/$tool")"
+          done
+          java -version
+          jar --version
+          javap -version
+          ndk_root="$ANDROID_HOME/ndk/29.0.14206865"
+          test "$(awk -F ' *= *' '$1 == "Pkg.Revision" {print $2}' "$ndk_root/source.properties")" = '29.0.14206865'
+          readelf="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          test -x "$readelf"
+          "$readelf" --version
+          cmake_bin="$ANDROID_HOME/cmake/4.1.2/bin"
+          for tool in cmake ctest ninja; do
+            test -x "$cmake_bin/$tool"
+            "$cmake_bin/$tool" --version
+          done
+          test "$("$cmake_bin/cmake" --version | head -n 1)" = 'cmake version 4.1.2'
+          # Use the pinned SDK CMake/CTest for the host scenarios too.
+          printf '%s\n' "$cmake_bin" >> "$GITHUB_PATH"
 
       - name: Prepare generated Android project with frozen dependencies
         if: inputs.android_run_id == ''
