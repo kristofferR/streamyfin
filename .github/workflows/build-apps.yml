@@ -9,6 +9,11 @@ on:
         default: spatial-ios
         options: [spatial-ios, spatial-tvos, progress-ios, progress-tvos]
 
+      android_run_id:
+        description: Optional prior run with successful native tests, compile and ABI checks for this exact workflow/candidate; requires coordinator verification
+        type: string
+        default: ''
+
 permissions:
   contents: read
 
@@ -17,7 +22,132 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  android:
+    name: Validate Android source binding
+    if: github.repository == 'kristofferR/streamyfin'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CI: 'true'
+      EXPO_TV: '0'
+      EXPO_NO_TELEMETRY: '1'
+      SENTRY_DISABLE_AUTO_UPLOAD: 'true'
+      PROGRESS_REF: 0f92a57d66f45e8cabbc6b60d5d1dafc2f7eaccd
+      PROGRESS_TREE: abb5dbaecaa07aa0f0c904506fd85b76ac1342f0
+      ANDROID_RUN_ID: ${{ inputs.android_run_id }}
+    steps:
+      - name: Checkout audited validation branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify workflow-only override before Android work
+        shell: bash
+        run: |
+          set -euo pipefail
+          spatial_ref=5e7c9211b8339ddb2178da6a83124b8a9da68353
+          test "$(git rev-parse "$spatial_ref^{tree}")" = 0d394d71a9f008bdff3b0b1451c2135267b00d6c
+          git diff --exit-code "$spatial_ref" HEAD -- . ':!.github/workflows/build-apps.yml'
+          git merge-base --is-ancestor "$spatial_ref" HEAD
+
+      - name: Checkout exact progress candidate
+
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.PROGRESS_REF }}
+          persist-credentials: false
+
+      - name: Verify exact Android source and immutable binding inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PROGRESS_REF"
+          test "$(git rev-parse HEAD^{tree})" = "$PROGRESS_TREE"
+          cd modules/mpv-player/android/libmpv-binding
+          sha256sum -c consumer/source-inputs.sha256
+
+      - name: Verify explicitly supplied preceding Android success
+        if: inputs.android_run_id != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ANDROID_RUN_ID" =~ ^[0-9]+$ ]]
+          # Public read-only metadata, no credential or permission expansion.
+          curl --fail --silent --show-error "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN_ID" > "$RUNNER_TEMP/prior-android-run.json"
+          jq -e --arg sha "$GITHUB_SHA" '.head_sha == $sha and .event == "workflow_dispatch" and .path == ".github/workflows/build-apps.yml" and .status == "completed"' "$RUNNER_TEMP/prior-android-run.json"
+          attempt="$(jq -r .run_attempt "$RUNNER_TEMP/prior-android-run.json")"
+          curl --fail --silent --show-error "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN_ID/attempts/$attempt/jobs?per_page=100" > "$RUNNER_TEMP/prior-android-jobs.json"
+          jq -e '[.jobs[] | select(.name == "Validate Android source binding" and .conclusion == "success") | select(any(.steps[]; .name == "Native identity scenarios without media" and .conclusion == "success")) | select(any(.steps[]; .name == "Compile source and consumer modules and run unit tests" and .conclusion == "success")) | select(any(.steps[]; .name == "Verify ABI, JNI and source-only dependency selection" and .conclusion == "success"))] | length == 1' "$RUNNER_TEMP/prior-android-jobs.json"
+
+      - name: Set up Bun
+        if: inputs.android_run_id == ''
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.2'
+
+      - name: Set up Java
+        if: inputs.android_run_id == ''
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install exact Android build tools
+        if: inputs.android_run_id == ''
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;29.0.14206865' 'cmake;4.1.2'
+
+      - name: Prepare generated Android project with frozen dependencies
+        if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run expo prebuild --platform android --clean --no-install
+          git diff --exit-code -- bun.lock package.json
+
+      - name: Native identity scenarios without media
+        if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          binding=modules/mpv-player/android/libmpv-binding
+          cmake -S "$binding/consumer/native-tests" -B "$RUNNER_TEMP/identity-tests"
+          cmake --build "$RUNNER_TEMP/identity-tests"
+          ctest --test-dir "$RUNNER_TEMP/identity-tests" --output-on-failure
+
+      - name: Confirm actual source and host module tasks
+        if: inputs.android_run_id == ''
+        working-directory: android
+        run: ./gradlew --no-daemon :streamyfin-libmpv-binding:tasks --all :mpv-player:tasks --all
+
+      - name: Compile source and consumer modules and run unit tests
+        if: inputs.android_run_id == ''
+        working-directory: android
+        run: ./gradlew --no-daemon :streamyfin-libmpv-binding:assembleDebug :streamyfin-libmpv-binding:testDebugUnitTest :mpv-player:compileDebugKotlin :mpv-player:testDebugUnitTest
+
+      - name: Verify ABI, JNI and source-only dependency selection
+        if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          binding=modules/mpv-player/android/libmpv-binding
+          input="$(cat "$binding/consumer/build/releasedMedia/artifact-path.txt")"
+          bash "$binding/consumer/verify-aar.sh" "$input" "$binding/consumer/build/outputs/aar/streamyfin-libmpv-binding-debug.aar" "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          cd android
+          ./gradlew --no-daemon :streamyfin-libmpv-binding:verifyHostUsesSourceBinding
+          ./gradlew --no-daemon :mpv-player:dependencyInsight --dependency dev.jdtech.mpv:libmpv --configuration debugRuntimeClasspath
+          cd ..
+          git diff --exit-code -- bun.lock package.json
+
+      - name: Remove Android build output
+        if: always()
+        run: rm -rf android modules/mpv-player/android/build modules/mpv-player/android/libmpv-binding/consumer/build modules/mpv-player/android/libmpv-binding/consumer/.cxx "$RUNNER_TEMP/identity-tests"
+
   validate:
+    needs: android
+
     if: github.repository == 'kristofferR/streamyfin'
     runs-on: macos-26
     # Prior archives took about 33 min iOS / 26 min tvOS. Four cold archives,
@@ -29,8 +159,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
-      PROGRESS_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
+      PROGRESS_REF: 0f92a57d66f45e8cabbc6b60d5d1dafc2f7eaccd
+      PROGRESS_TREE: abb5dbaecaa07aa0f0c904506fd85b76ac1342f0
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -137,7 +267,7 @@ jobs:
         with:
           ref: ${{ env.PROGRESS_REF }}
           path: progress-candidate
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
 
       - name: Verify progress candidate and run native generation scenarios
@@ -161,9 +291,9 @@ jobs:
           git diff --exit-code -- bun.lock package.json
           source_path=utils/nativePlayer/applyLoadEvent.ts
           trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"' EXIT
-          git show "$PROGRESS_REF^:$source_path" > "$source_path"
+          git show "56c39e439a4529de13a38434bb76fd149ce34f14:$source_path" > "$source_path"
           # The previous candidate lacked canonical hostname matching.
-          git show "$PROGRESS_REF^:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts
+          git show "56c39e439a4529de13a38434bb76fd149ce34f14:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts
           trap 'git show "$PROGRESS_REF:$source_path" > "$source_path"; git show "$PROGRESS_REF:utils/nativePlayer/syncPlay.ts" > utils/nativePlayer/syncPlay.ts' EXIT
           if bun run test:unit --runInBand utils/nativePlayer/applyLoadEvent.test.ts; then
             echo 'Regression test unexpectedly passed before hostname normalization'
