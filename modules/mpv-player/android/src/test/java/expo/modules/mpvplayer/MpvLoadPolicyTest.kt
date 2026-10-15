@@ -10,6 +10,48 @@ class MpvLoadPolicyTest {
     private fun policy() = MpvLoadPolicy<Any>()
     private val loaded = MpvEventSnapshot.Event(8, 0, null)
 
+    @Test fun recoveryRetainsPendingAcknowledgementButNotAReplacedOrTerminalOne() {
+        listOf(false, true).forEach { boundBeforeRecovery ->
+            val policy = policy()
+            val handle = Any()
+            var acknowledgements = 0
+            val first = policy.begin(handle) { acknowledgements++ }
+            val file = MpvFileKey(handle, 1)
+            if (boundBeforeRecovery) policy.bind(first, file)
+            policy.receive(handle, file, loaded, true)
+            val recovery = policy.beginRecovery(handle)
+            assertFalse(policy.bind(first, file).accepted)
+            val recoveredFile = MpvFileKey(handle, 2)
+            policy.receive(handle, recoveredFile, loaded, true)
+            val prepared = policy.bind(recovery, recoveredFile).receipts.single()
+            assertEquals(0, acknowledgements)
+            policy.takeLoadCompletion(prepared)?.invoke()
+            policy.takeLoadCompletion(prepared)?.invoke()
+            assertEquals(1, acknowledgements)
+            val laterRecovery = policy.beginRecovery(handle)
+            policy.bind(laterRecovery, MpvFileKey(handle, 3))
+            val later = policy.receive(handle, MpvFileKey(handle, 3), loaded, true)!!
+            policy.takeLoadCompletion(later)?.invoke()
+            assertEquals(1, acknowledgements)
+
+            val failed = policy.begin(handle) { acknowledgements++ }
+            val failedFile = MpvFileKey(handle, 4)
+            policy.bind(failed, failedFile)
+            policy.receive(handle, failedFile, MpvEventSnapshot.EndFile(MPVLib.MPV_END_FILE_REASON_ERROR, -1, 0, 0), true)
+            val afterError = policy.beginRecovery(handle)
+            policy.bind(afterError, MpvFileKey(handle, 5))
+            policy.takeLoadCompletion(policy.receive(handle, MpvFileKey(handle, 5), loaded, true)!!)?.invoke()
+            assertEquals(1, acknowledgements)
+            policy.begin(handle) { acknowledgements++ }
+            val differentHandle = Any()
+            val newRequest = policy.beginRecovery(differentHandle)
+            val reused = MpvFileKey(differentHandle, 1)
+            policy.bind(newRequest, reused)
+            policy.takeLoadCompletion(policy.receive(differentHandle, reused, loaded, true)!!)?.invoke()
+            assertEquals(1, acknowledgements)
+        }
+    }
+
     @Test fun bindingAndEarlyReadinessCannotAcknowledgeBeforeFilePreparation() {
         val policy = policy()
         val handle = Any()

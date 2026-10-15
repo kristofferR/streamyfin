@@ -67,12 +67,6 @@ class MPVLayerRenderer(
         const val MPV_FORMAT_DOUBLE = 5
         const val MPV_FORMAT_NODE = 6
 
-        // One worker for every renderer: only one player is alive at a time,
-        // and a daemon thread never keeps the process from exiting.
-        private val loadExecutor = Executors.newSingleThreadExecutor { task ->
-            Thread(task, "mpv-load").apply { isDaemon = true }
-        }
-
         private val surfaceSizeExecutor = Executors.newSingleThreadExecutor { task ->
             Thread(task, "mpv-surface-size").apply { isDaemon = true }
         }
@@ -110,6 +104,7 @@ class MPVLayerRenderer(
     
     private val mainHandler = Handler(Looper.getMainLooper())
     private val loadPolicy = MpvLoadPolicy<MPVLib>()
+    @Volatile private var nativeWorker: MpvNativeWorker? = null
 
     // The latest surface size not yet handed to mpv; see updateSurfaceSize.
     private val pendingSurfaceSize = AtomicReference<String?>(null)
@@ -135,6 +130,7 @@ class MPVLayerRenderer(
     private var loadStartPosition: Double = 0.0
     private var cachedDuration: Double = 0.0
     private var cachedCacheSeconds: Double = 0.0
+    private var metadataRevision = MpvFileMetadata.Revision()
     private var _isPaused: Boolean = true
     private var _isLoading: Boolean = false
     private var loadingRevision = 0L
@@ -247,6 +243,7 @@ class MPVLayerRenderer(
             // Per-instance handle — see class-level comment. Each player gets
             // its own mpv; we drop the reference in stop().
             val mpv = MPVLib.create(context)
+            nativeWorker = MpvNativeWorker()
             this.mpv = mpv
             mpv.addObserver(this)
 
@@ -419,6 +416,8 @@ class MPVLayerRenderer(
         activeOwnershipToken = null
 
         val m = mpv
+        val worker = nativeWorker
+        nativeWorker = null
         mpv = null
         isRunning = false
 
@@ -440,21 +439,21 @@ class MPVLayerRenderer(
             return
         }
 
-        // Teardown shares the native load worker. mpv's "stop" command
+        // Teardown bypasses this handle's load worker. mpv's "stop" command
         // flushes the demuxer queue and releases the MediaCodec hardware
         // decoder — synchronous JNI work that can block for hundreds of ms
         // on TV hardware. Running it on the main thread produced a visible
         // delay/stutter between pressing "exit" and the confirm alert
         // appearing. The local `m` keeps the MPVLib instance alive for the
         // lifetime of this thread even though we've already nulled `mpv`.
-        loadExecutor.execute {
+        checkNotNull(worker).retire {
             // Drop force-window BEFORE issuing stop. With keep-open=always +
             // force-window=yes, mpv tears down the decoder at stop time but
             // tries to keep the VO alive — which fires an internal
             // video-reconfig. On libmpv 1.0's gpu-next/android backend that
             // reconfig path crashes with "Missing surface pointer" because we
-            // detach the Surface below before mpv's worker reaches the
-            // reconfig step (command() is async). Setting force-window=no
+            // detach the Surface below before mpv finishes that
+            // reconfig step. Setting force-window=no
             // first makes mpv tear VO down cleanly instead of attempting a
             // doomed re-init, eliminating the fatal VO error and the
             // "playback won't restart" aftermath.
@@ -607,7 +606,7 @@ class MPVLayerRenderer(
         // Full reload at the cached position. With keep-open=always +
         // cache-pause-initial=yes, mpv seeks to the position and holds on the
         // first decoded frame, so a paused frame reappears.
-        load(
+        loadInternal(
             VideoLoadConfig(
                 url = url,
                 headers = currentHeaders,
@@ -617,6 +616,8 @@ class MPVLayerRenderer(
                 loop = currentLoop,
                 externalSubtitles = activeExternalSubtitles,
             ),
+            onLoaded = {},
+            recovery = true,
         )
 
         // Hold the intended state explicitly — load() doesn't touch the pause
@@ -664,8 +665,12 @@ class MPVLayerRenderer(
     override fun load(config: VideoLoadConfig) = load(config) {}
 
     override fun load(config: VideoLoadConfig, onLoaded: () -> Unit) {
+        loadInternal(config, onLoaded, recovery = false)
+    }
+
+    private fun loadInternal(config: VideoLoadConfig, onLoaded: () -> Unit, recovery: Boolean) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { load(config, onLoaded) }
+            mainHandler.post { loadInternal(config, onLoaded, recovery) }
             return
         }
         val loadConfig = config.copy(
@@ -674,7 +679,7 @@ class MPVLayerRenderer(
         )
         val handle = mpv ?: return
         // Invalidate old receipts before issuing any synchronous JNI command.
-        val request = loadPolicy.begin(handle, onLoaded)
+        val request = if (recovery) loadPolicy.beginRecovery(handle) else loadPolicy.begin(handle, onLoaded)
         invalidateSeekReports()
         val url = loadConfig.url
         currentUrl = url
@@ -702,7 +707,7 @@ class MPVLayerRenderer(
 
         // Native load and FILE_LOADED work share one worker. A subtitle fetch
         // can block, but cannot run against a replacement loaded behind it.
-        loadExecutor.execute {
+        nativeWorker?.execute {
             if (!loadPolicy.isCurrent(request)) return@execute
             val result = try {
                 handle.command(arrayOf("stop"))
@@ -738,12 +743,14 @@ class MPVLayerRenderer(
 
     override fun reloadCurrentItem() {
         currentUrl?.let { url ->
-            load(
+            loadInternal(
                 VideoLoadConfig(
                     url = url,
                     headers = currentHeaders,
                     loop = currentLoop,
                 ),
+                onLoaded = {},
+                recovery = true,
             )
         }
     }
@@ -1260,9 +1267,9 @@ class MPVLayerRenderer(
     }
 
     private fun stopRejectedInput(receipt: MpvReceipt) {
-        // Loads, rejected-input stops and teardown share this worker. A new
+        // Loads and rejected-input stops share this handle's worker. A new
         // load cannot reach mpv between this ownership check and the command.
-        loadExecutor.execute {
+        nativeWorker?.execute {
             val handle = receipt.request.handle
             if (mpv !== handle || !loadPolicy.ownsTerminal(receipt)) return@execute
             try {
@@ -1282,6 +1289,12 @@ class MPVLayerRenderer(
     }
 
     private fun handleInteger(receipt: MpvReceipt, property: String, value: Long) {
+        metadataRevision = when (property) {
+            "video-params/w" -> metadataRevision.copy(width = metadataRevision.width + 1)
+            "video-params/h" -> metadataRevision.copy(height = metadataRevision.height + 1)
+            "video-params/rotate" -> metadataRevision.copy(rotation = metadataRevision.rotation + 1)
+            else -> metadataRevision
+        }
         when (property) {
             "track-list/count" -> if (value > 0) notify(receipt) { it.onTracksReady() }
             "chapter-list/count" -> {
@@ -1313,7 +1326,7 @@ class MPVLayerRenderer(
         when (property) {
             "pause" -> {
                 val capture = loadPolicy.capturePause(receipt) ?: return
-                loadExecutor.execute {
+                nativeWorker?.execute {
                     val report = capturePauseReport(capture, value) ?: return@execute
                     mainHandler.post { reportPause(capture, report) }
                 }
@@ -1366,6 +1379,7 @@ class MPVLayerRenderer(
     private fun handleDecimal(receipt: MpvReceipt, property: String, value: Double) {
         when (property) {
             "duration" -> {
+                metadataRevision = metadataRevision.copy(duration = metadataRevision.duration + 1)
                 cachedDuration = value
                 reportProgress(receipt)
             }
@@ -1377,7 +1391,10 @@ class MPVLayerRenderer(
                     reportProgress(receipt)
                 }
             }
-            "demuxer-cache-duration" -> cachedCacheSeconds = value
+            "demuxer-cache-duration" -> {
+                metadataRevision = metadataRevision.copy(cache = metadataRevision.cache + 1)
+                cachedCacheSeconds = value
+            }
         }
     }
 
@@ -1398,23 +1415,35 @@ class MPVLayerRenderer(
                 val audioId = initialAudioId
                 val subtitleId = initialSubtitleId ?: -1
                 pendingExternalSubtitles = emptyList()
-                // Reconcile one-shot metadata on the main owner before the
-                // asynchronous subtitle fetch; never apply an older cache later.
-                cachedDuration = handle.getPropertyDouble("duration") ?: cachedDuration
-                cachedCacheSeconds = handle.getPropertyDouble("demuxer-cache-duration") ?: cachedCacheSeconds
-                _videoWidth = handle.getPropertyInt("video-params/w") ?: _videoWidth
-                _videoHeight = handle.getPropertyInt("video-params/h") ?: _videoHeight
-                _videoRotation = handle.getPropertyInt("video-params/rotate") ?: _videoRotation
-                reportProgress(receipt)
-                if (!isCurrent(receipt)) return
-                notifyVideoDimensionsIfReady(receipt)
-                if (!isCurrent(receipt)) return
+                val metadataAtReceipt = metadataRevision
                 val loadingAtReceipt = loadingRevision
-                loadExecutor.execute {
+                nativeWorker?.execute {
                     if (!isCurrent(receipt)) return@execute
                     try {
-                        subtitles.forEach { handle.command(arrayOf("sub-add", it, "auto")) }
+                        val metadata = captureMpvFileMetadata(
+                            { isCurrent(receipt) }, handle::getPropertyDouble, handle::getPropertyInt,
+                        ) ?: return@execute
+                        mainHandler.post {
+                            if (!isCurrent(receipt)) return@post
+                            val reconciled = metadata.reconcile(
+                                MpvFileMetadata(cachedDuration, cachedCacheSeconds, _videoWidth, _videoHeight, _videoRotation),
+                                metadataAtReceipt, metadataRevision,
+                            )
+                            reconciled.duration?.let { cachedDuration = it }
+                            reconciled.cache?.let { cachedCacheSeconds = it }
+                            reconciled.width?.let { _videoWidth = it }
+                            reconciled.height?.let { _videoHeight = it }
+                            reconciled.rotation?.let { _videoRotation = it }
+                            reportProgress(receipt)
+                            if (isCurrent(receipt)) notifyVideoDimensionsIfReady(receipt)
+                        }
+                        subtitles.forEach {
+                            if (!isCurrent(receipt)) return@execute
+                            handle.command(arrayOf("sub-add", it, "auto"))
+                        }
+                        if (!isCurrent(receipt)) return@execute
                         audioId?.let { if (it > 0) handle.setPropertyInt("aid", it) }
+                        if (!isCurrent(receipt)) return@execute
                         selectSubtitle(handle, subtitleId)
                         val pauseCapture = loadPolicy.capturePause(receipt)
                         val pauseReport = pauseCapture?.let { capturePauseReport(it, null) }
@@ -1459,23 +1488,34 @@ class MPVLayerRenderer(
                 if (event.seekGeneration != seekReportGeneration || event.seekRequestId != seekReportRequestId) return
                 val requestId = if (_isSeeking) activeSeekReportRequestId else null
                 if (requestId != null && requestId != event.seekRequestId) return
-                val position = handle.getPropertyDouble("time-pos")
-                if (position != null && position.isFinite() && position >= 0) cachedPosition = position
-                val duration = cachedDuration
-                val cache = cachedCacheSeconds
-                val wasLoading = _isLoading
-                loadingRevision++
-                _isSeeking = false
-                activeSeekReportRequestId = null
-                _isLoading = false
-                if (position != null && position.isFinite() && position >= 0) {
-                    if (requestId != null) {
-                        notify(receipt) { it.onSeekCompleted(requestId, position, duration, cache) }
-                    } else {
-                        notify(receipt) { it.onPositionChanged(position, duration, cache) }
+                val loadingAtReceipt = loadingRevision
+                val currentClock = {
+                    isCurrent(receipt) && loadPolicy.isCurrentClock(receipt) &&
+                        event.seekGeneration == seekReportGeneration && event.seekRequestId == seekReportRequestId
+                }
+                nativeWorker?.execute {
+                    val clock = captureMpvClockReport(currentClock, handle::getPropertyDouble) ?: return@execute
+                    mainHandler.post {
+                        if (!currentClock()) return@post
+                        clock.position?.let { cachedPosition = it }
+                        _isSeeking = false
+                        activeSeekReportRequestId = null
+                        if (clock.position != null) {
+                            if (requestId != null) {
+                                notify(receipt) { it.onSeekCompleted(requestId, clock.position, clock.duration, clock.cache) }
+                            } else {
+                                notify(receipt) { it.onPositionChanged(clock.position, clock.duration, clock.cache) }
+                            }
+                        }
+                        if (!currentClock()) return@post
+                        if (loadingRevision == loadingAtReceipt) {
+                            val wasLoading = _isLoading
+                            loadingRevision++
+                            _isLoading = false
+                            if (wasLoading) notify(receipt) { it.onLoadingChanged(false) }
+                        }
                     }
                 }
-                if (wasLoading) notify(receipt) { it.onLoadingChanged(false) }
             }
         }
     }

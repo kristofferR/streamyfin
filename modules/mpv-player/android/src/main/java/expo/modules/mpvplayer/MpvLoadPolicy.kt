@@ -6,7 +6,7 @@ internal data class MpvFileKey(val source: Any, val entry: Long)
 /** Serializes command-bound requests and immutable native lifecycle receipts. */
 internal class MpvLoadPolicy<H : Any> {
     class Request<H>(val handle: H)
-    data class Receipt<H>(val request: Request<H>, val file: MpvFileKey, val event: MpvEventSnapshot, val epoch: Long, val pauseRevision: Long)
+    data class Receipt<H>(val request: Request<H>, val file: MpvFileKey, val event: MpvEventSnapshot, val epoch: Long, val pauseRevision: Long, val clockRevision: Long)
     data class PauseCapture<H>(val receipt: Receipt<H>, val revision: Long)
     data class Binding<H>(val accepted: Boolean, val receipts: List<Receipt<H>>)
     enum class Stage { PENDING, PREPARED, TERMINAL }
@@ -27,6 +27,7 @@ internal class MpvLoadPolicy<H : Any> {
     private var latestEof: Receipt<H>? = null
     private var eofDelivered = false
     private var pauseRevision = 0L
+    private var clockRevision = 0L
     private var bindingPending = false
     private var overflowed = false
     private var invalidated = false
@@ -37,6 +38,14 @@ internal class MpvLoadPolicy<H : Any> {
         clear()
         loadCompletion = onLoaded
         return Request(handle).also { request = it; bindingPending = true }
+    }
+
+    /** Recovery replaces native identity, but still completes the same host load. */
+    @Synchronized fun beginRecovery(handle: H): Request<H> {
+        val pending = loadCompletion?.takeIf {
+            request?.handle === handle && !invalidated && stage == Stage.PENDING
+        }
+        return begin(handle, pending ?: {})
     }
 
     /** Values are copied before this call. No JNI or callbacks run under this lock. */
@@ -84,7 +93,7 @@ internal class MpvLoadPolicy<H : Any> {
             }
             if (stage != Stage.TERMINAL && event is MpvEventSnapshot.EndFile &&
                 event.reason != MPVLib.MPV_END_FILE_REASON_EOF && this.file == file) {
-                val receipt = Receipt(request, file, event, epoch, pauseRevision)
+                val receipt = Receipt(request, file, event, epoch, pauseRevision, clockRevision)
                 return terminate(if (event.reason == MPVLib.MPV_END_FILE_REASON_REDIRECT)
                     receipt.copy(event = MpvEventSnapshot.Failure("Playlist inputs are not supported by this player")) else receipt)
             }
@@ -106,7 +115,9 @@ internal class MpvLoadPolicy<H : Any> {
         }
         if (stage == Stage.TERMINAL || this.file != file) return null
         if (event is MpvEventSnapshot.Flag && event.property == "pause") pauseRevision++
-        val receipt = Receipt(request, file, event, epoch, pauseRevision)
+        if (event is MpvEventSnapshot.Event &&
+            (event.id == MPVLib.MPV_EVENT_SEEK || event.id == MPVLib.MPV_EVENT_PLAYBACK_RESTART)) clockRevision++
+        val receipt = Receipt(request, file, event, epoch, pauseRevision, clockRevision)
         if (event is MpvEventSnapshot.Flag && event.property == "eof-reached") {
             latestEof = receipt
             // Baseline replay semantics: a native false rearms completion.
@@ -199,6 +210,10 @@ internal class MpvLoadPolicy<H : Any> {
 
     @Synchronized fun isCurrent(capture: PauseCapture<H>): Boolean =
         isCurrent(capture.receipt) && capture.revision == pauseRevision
+
+    /** Observed SEEK/RESTART revokes a queued clock read; it is not a host seek acknowledgement. */
+    @Synchronized fun isCurrentClock(receipt: Receipt<H>): Boolean =
+        isCurrent(receipt) && receipt.clockRevision == clockRevision
 
     @Synchronized fun invalidate(handle: H): Request<H>? {
         val current = request?.takeIf { it.handle === handle && !invalidated } ?: return null
