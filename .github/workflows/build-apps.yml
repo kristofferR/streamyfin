@@ -93,9 +93,39 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android command-line tools
+        if: inputs.android_run_id == ''
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        env:
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk
+          ANDROID_HOME: ${{ runner.temp }}/android-sdk
+        with:
+          cmdline-tools-version: '15859902' # 22.0
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+
+      - name: Verify Android SDK root and command-line tools
+        if: inputs.android_run_id == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_root="$(realpath "$RUNNER_TEMP/android-sdk")"
+          test "$(realpath "$ANDROID_HOME")" = "$sdk_root"
+          test "$(realpath "$ANDROID_SDK_ROOT")" = "$sdk_root"
+          sdk_manager="$(realpath "$(command -v sdkmanager)")"
+          test -x "$sdk_manager"
+          case "$sdk_manager" in
+            "$sdk_root"/*) ;;
+            *) echo 'sdkmanager is outside the configured SDK root'; exit 1 ;;
+          esac
+          printf 'SDK root: %s\nsdkmanager: %s\n' "$sdk_root" "$sdk_manager"
+          "$sdk_manager" --sdk_root="$sdk_root" --version | tee "$RUNNER_TEMP/sdkmanager-version.txt"
+          test "$(tr -d '\r' < "$RUNNER_TEMP/sdkmanager-version.txt")" = '22.0'
+          printf 'SDKMANAGER_PATH=%s\n' "$sdk_manager" >> "$GITHUB_ENV"
+
       - name: Install exact Android build tools
         if: inputs.android_run_id == ''
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;29.0.14206865' 'cmake;4.1.2'
+        run: '"$SDKMANAGER_PATH" --sdk_root="$ANDROID_SDK_ROOT" "platforms;android-36" "build-tools;35.0.0" "ndk;29.0.14206865" "cmake;4.1.2"'
 
       - name: Prepare generated Android project with frozen dependencies
         if: inputs.android_run_id == ''
