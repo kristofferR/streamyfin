@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           git diff --exit-code "$SPATIAL_REF" HEAD -- . ':!.github/workflows/build-apps.yml'
-          test "$(git rev-parse HEAD^)" = "$SPATIAL_REF"
+          git merge-base --is-ancestor "$SPATIAL_REF" HEAD
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
