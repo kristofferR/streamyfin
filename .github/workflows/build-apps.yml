@@ -32,8 +32,8 @@ jobs:
       EXPO_TV: '0'
       EXPO_NO_TELEMETRY: '1'
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
-      PROGRESS_REF: 5db04930d82862180e074316ded21674a6410353
-      PROGRESS_TREE: 2e859a9a0b27bba3803dc580b817497ca284e860
+      PROGRESS_REF: 8874886dc3318b384614c8ec1aabe0ed64235d99
+      PROGRESS_TREE: 969cbbd41822beb1329fc9eaba9099f9b655b61f
       ANDROID_RUN_ID: ${{ inputs.android_run_id }}
     steps:
       - name: Checkout audited validation branch
@@ -296,8 +296,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       BASELINE_REF: 77ec6e62f4ec25332ec7ee89802f53a1a22af871
       BASELINE_TREE: e166da9e09a58e4d1494e94ebcac2ad332f3e471
-      CANDIDATE_REF: 5db04930d82862180e074316ded21674a6410353
-      CANDIDATE_TREE: 2e859a9a0b27bba3803dc580b817497ca284e860
+      CANDIDATE_REF: 8874886dc3318b384614c8ec1aabe0ed64235d99
+      CANDIDATE_TREE: 969cbbd41822beb1329fc9eaba9099f9b655b61f
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -1050,8 +1050,8 @@ jobs:
       SENTRY_DISABLE_AUTO_UPLOAD: 'true'
       SPATIAL_REF: 5e7c9211b8339ddb2178da6a83124b8a9da68353
       SPATIAL_TREE: 0d394d71a9f008bdff3b0b1451c2135267b00d6c
-      PROGRESS_REF: 5db04930d82862180e074316ded21674a6410353
-      PROGRESS_TREE: 2e859a9a0b27bba3803dc580b817497ca284e860
+      PROGRESS_REF: 8874886dc3318b384614c8ec1aabe0ed64235d99
+      PROGRESS_TREE: 969cbbd41822beb1329fc9eaba9099f9b655b61f
     steps:
       - name: Checkout audited validation branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
