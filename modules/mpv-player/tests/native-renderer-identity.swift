@@ -352,11 +352,11 @@ struct RendererIdentityTests {
         exhausted.start(handle: handle, entryID: 1)
         precondition(exhausted.receipt == nil)
         exhausted.start(handle: newHandle, entryID: 1)
-        let current = exhausted.receipt!
+        let newHandleReceipt = exhausted.receipt!
         _ = exhausted.end(handle: handle, payload: end(1, 4))
         precondition(exhausted.receipt?.isActive == true)
         exhausted.clear()
-        precondition(!current.isValid)
+        precondition(!newHandleReceipt.isValid)
         print("Renderer production END handling, rejection stops, receipt permits and overflow passed")
     }
 }
