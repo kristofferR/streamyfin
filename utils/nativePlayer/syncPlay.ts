@@ -5,6 +5,7 @@ import type {
 } from "@/modules/mpv-player";
 import type { useSyncPlay } from "@/providers/SyncPlayProvider";
 import type { SyncPlaySnapshot } from "@/utils/syncplay/types";
+import { domainToAscii } from "./punycode";
 
 /** What a queue row shows, by media id. */
 export type SyncPlayQueueDisplay = Record<
@@ -88,9 +89,16 @@ const decoded = (url: string) => {
   }
 };
 
+// The authority's host: after the scheme and any userinfo, before a port or path.
+const HOST = /^([a-z][a-z\d+.-]*:\/\/(?:[^@/?#]*@)?)([^:/?#[\]]+)/i;
+
 const canonicalStreamUrl = (url: string) => {
   try {
-    return decoded(new URL(url).href);
+    const ascii = url.replace(
+      HOST,
+      (_, prefix: string, host: string) => prefix + domainToAscii(host),
+    );
+    return decoded(new URL(ascii).href);
   } catch {
     return decoded(url);
   }
