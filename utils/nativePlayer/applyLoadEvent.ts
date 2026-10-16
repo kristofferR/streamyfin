@@ -25,7 +25,8 @@ export function applyLoadEvent(
   session: LoadEventSession,
   event: LoadEvent,
 ): boolean {
-  if (event.url && !isSameStreamUrl(event.url, session.stream.url)) return false;
+  if (event.url && !isSameStreamUrl(event.url, session.stream.url))
+    return false;
   session.awaitingLoad = false;
   if (typeof event.muted === "boolean") session.isMuted = event.muted;
   if (typeof event.isPlaying === "boolean") {

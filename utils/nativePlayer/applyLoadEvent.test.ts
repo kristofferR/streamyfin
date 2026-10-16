@@ -34,10 +34,10 @@ describe("applyLoadEvent", () => {
     ).toBe(false);
     expect(s.positionMs).toBe(0);
 
-    expect(applyLoadEvent(s, { url: s.stream.url, isPlaying: true })).toBe(true);
-    expect(
-      applyProgressTick(s, { position: 30 }, 11_000, 10_000),
-    ).toBe(true);
+    expect(applyLoadEvent(s, { url: s.stream.url, isPlaying: true })).toBe(
+      true,
+    );
+    expect(applyProgressTick(s, { position: 30 }, 11_000, 10_000)).toBe(true);
     expect(s.positionMs).toBe(30_000);
   });
 
@@ -56,7 +56,10 @@ describe("applyLoadEvent", () => {
     const s = fresh();
     s.stream.url = "file:///media/A movie.mkv";
     expect(
-      applyLoadEvent(s, { url: "file:///media/A%20movie.mkv", isPlaying: true }),
+      applyLoadEvent(s, {
+        url: "file:///media/A%20movie.mkv",
+        isPlaying: true,
+      }),
     ).toBe(true);
     expect(s.awaitingLoad).toBe(false);
   });
