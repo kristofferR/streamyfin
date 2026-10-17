@@ -73,7 +73,9 @@ jobs:
           unzip -q "$ipa" -d "$RUNNER_TEMP/ipa"
           app=$(ls -d "$RUNNER_TEMP"/ipa/Payload/*.app | head -n 1)
           ls "$app/Frameworks"
-          file "$app/Frameworks/SpatialAudioCore.framework/SpatialAudioCore"
+          core="$app/Frameworks/SpatialAudioCore.framework/SpatialAudioCore"
+          test -f "$core"
+          file "$core"
           binary="$app/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")"
           otool -L "$binary" | grep -F '@rpath/SpatialAudioCore.framework/SpatialAudioCore'
           otool -l "$binary" | grep -A2 LC_RPATH | grep -F '@executable_path/Frameworks'
