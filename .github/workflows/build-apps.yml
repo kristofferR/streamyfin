@@ -60,12 +60,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run ${{ matrix.platform == 'tvos' && 'prebuild:tv' || 'prebuild' }}
       - name: Show the resolved SpatialAudioBridge
+        if: hashFiles('plugins/withSpatialAudioCore.ts') != ''
         run: |
           grep -A3 'SpatialAudioBridge' ios/Pods/Pods.xcodeproj/project.pbxproj | grep -E 'repositoryURL|kind|version' | sort -u
       - run: bun run ${{ matrix.platform == 'tvos' && 'ios:unsigned-build:tv' || 'ios:unsigned-build' }}
       # SpatialAudioBridge 2's core is a dynamic framework: without it in the
       # bundle the app fails to launch, which a build alone never shows.
       - name: Check the app embeds and links SpatialAudioCore
+        if: hashFiles('plugins/withSpatialAudioCore.ts') != ''
         run: |
           set -euo pipefail
           ipa=$(ls build/*.ipa | head -n 1)
